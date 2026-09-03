@@ -17,7 +17,11 @@ services:
         value: china
       - key: KN_AUTH               # в облаке вход по логину и паролю обязателен
         value: "1"
-      - key: KN_ADMIN_PASSWORD     # пароль владельца (логин admin), задаётся при старте
+      - key: KN_OPEN_KEY           # ключ личной ссылки: …/?k=КЛЮЧ — вход без пароля
+        sync: false
+      - key: KN_ADMIN_PASSWORD     # запасной пароль владельца (логин admin), задаётся при старте
+        sync: false
+      - key: KN_SECRET             # подпись сессионных cookie
         sync: false
       - key: KN_KEEPALIVE_URL      # https://china-uchet.onrender.com/api/ping — не даёт бесплатному сервису засыпать
         sync: false
