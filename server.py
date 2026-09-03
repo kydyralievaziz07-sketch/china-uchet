@@ -8,6 +8,7 @@
 Этап 4: инвесторы — вложения, доли, выплаты, прибыль по партии, отчёт инвестору.
 Этап 5: облако — та же программа на Render + Postgres (Supabase), вход по паролю (KN_AUTH=1),
         роль «помощник» без денег, пользователи, перенос базы файлом .db, поддержание сервиса бодрым.
+Этап 6: голосовое управление из Telegram (модуль tgbot.py) — наговорил, бот заполнил.
 Стандартная библиотека Python + SQLite локально; в облаке — pg8000 и Postgres (DATABASE_URL).
 """
 import base64, csv, hashlib, hmac, io, json, os, re, shutil, sqlite3, secrets, struct, sys, threading, time, zlib
@@ -16,7 +17,7 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "5.2.0"
+VERSION = "6.0.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -30,6 +31,19 @@ OPEN_KEY = (os.environ.get("KN_OPEN_KEY") or "").strip()
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 PG_SCHEMA = re.sub(r"[^a-z0-9_]", "", (os.environ.get("KN_PG_SCHEMA") or "china").lower()) or "china"
+try:
+    import tgbot            # этап 6: голосовое управление через Telegram
+except Exception as _e:
+    tgbot = None; print("Голосовой бот не подключён:", _e)
+
+def web_url():
+    """Адрес программы для кнопки «Открыть» в Telegram — с личным ключом, чтобы открывалось сразу."""
+    u = (os.environ.get("KN_WEB_URL") or "").strip()
+    if not u:
+        ka = (os.environ.get("KN_KEEPALIVE_URL") or "").strip()
+        u = ka.replace("/api/ping", "")
+    u = u.rstrip("/")
+    return (u + "/?k=" + OPEN_KEY) if (u and OPEN_KEY) else (u or None)
 
 # ---------------------------------------------------------------- база: схема
 SCHEMA = """
@@ -773,6 +787,15 @@ class H(BaseHTTPRequestHandler):
         secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") == "https") else ""
         return "kn_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax%s" % (tok, max_age, secure)
 
+    def tg_hook(self):
+        """Сюда Telegram присылает сообщения. Отвечаем сразу, разбираем голос в фоне."""
+        if not (tgbot and tgbot.enabled()): return self._err(404, "Бот выключен")
+        if tgbot.SECRET and self.headers.get("X-Telegram-Bot-Api-Secret-Token") != tgbot.SECRET:
+            return self._err(403, "Чужой запрос")
+        try: tgbot.enqueue(self._body())
+        except Exception as e: print("вебхук Telegram:", e)
+        return self._send(200, {"ok": True})
+
     def _link(self, user):
         """Владельцу отдаём его личную ссылку входа — показать в настройках и открыть на телефоне."""
         return {"link": "/?k=" + OPEN_KEY} if (OPEN_KEY and (user or {}).get("role") == "owner") else {}
@@ -805,6 +828,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/ping" and method == "GET":
                 return self._send(200, {"ok": True, "version": VERSION, "db": "postgres" if IS_PG else "sqlite", "auth": AUTH})
             if path == "/api/login" and method == "POST": return self.api_login()
+            if path == "/api/tg/hook" and method == "POST": return self.tg_hook()
             user = self._user(); self.user = user
             if path.startswith("/api/") and not user: return self._err(401, "Нужен вход")
             if path == "/api/logout" and method == "POST":
@@ -1624,6 +1648,10 @@ def main():
         try: make_icon(icon)
         except Exception as e: print("Иконка не создана:", e)
     keepalive()
+    if tgbot:
+        threading.Timer(2, lambda: tgbot.start({
+            "port": PORT, "web_url": web_url(),
+            "token": lambda: make_token((owner_user() or {}).get("login") or "admin", 1)})).start()
     srv = ThreadingHTTPServer((HOST, PORT), H)
     print("Китай · учёт %s работает: http://%s:%d · база: %s · вход: %s" % (
         VERSION, "localhost" if HOST == "127.0.0.1" else HOST, PORT, "Postgres/" + PG_SCHEMA if IS_PG else "SQLite",

@@ -25,5 +25,15 @@ services:
         sync: false
       - key: KN_KEEPALIVE_URL      # https://china-uchet.onrender.com/api/ping — не даёт бесплатному сервису засыпать
         sync: false
+      - key: KN_TG_TOKEN           # токен бота @Kitaibizmartbot — голосовое управление
+        sync: false
+      - key: KN_TG_SECRET          # подпись вебхука Telegram
+        sync: false
+      - key: KN_TG_ALLOW           # id владельца в Telegram: только он управляет учётом
+        sync: false
+      - key: KN_TG_HOOK_URL        # https://china-uchet.onrender.com/api/tg/hook
+        sync: false
+      - key: KN_AI_KEY             # ключ Groq: распознавание речи (whisper) + разбор смысла
+        sync: false
       - key: PYTHON_VERSION
         value: "3.12.4"
