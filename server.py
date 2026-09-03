@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "5.1.0"
+VERSION = "5.2.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -25,6 +25,8 @@ HOST = "0.0.0.0" if (os.environ.get("RENDER") or os.environ.get("KN_HOST") == "0
 SECRET_FILE = os.path.join(ROOT, ".secret")
 # Вход по логину и паролю нужен только облачной версии. Локально программа открывается сразу.
 AUTH = os.environ.get("KN_AUTH", "0") == "1"
+# Личная ссылка вместо пароля: открыл https://…/?k=КЛЮЧ один раз — устройство помнит вход год.
+OPEN_KEY = (os.environ.get("KN_OPEN_KEY") or "").strip()
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 PG_SCHEMA = re.sub(r"[^a-z0-9_]", "", (os.environ.get("KN_PG_SCHEMA") or "china").lower()) or "china"
@@ -771,6 +773,23 @@ class H(BaseHTTPRequestHandler):
         secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") == "https") else ""
         return "kn_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax%s" % (tok, max_age, secure)
 
+    def _link(self, user):
+        """Владельцу отдаём его личную ссылку входа — показать в настройках и открыть на телефоне."""
+        return {"link": "/?k=" + OPEN_KEY} if (OPEN_KEY and (user or {}).get("role") == "owner") else {}
+
+    def _key_login(self, path, q):
+        """Вход по ссылке: ставим cookie на год и убираем ключ из адреса."""
+        if not (OPEN_KEY and q.get("k")) or path.startswith("/api/"): return False
+        try: ok = hmac.compare_digest(q["k"][0].encode("utf-8"), OPEN_KEY.encode("utf-8"))
+        except Exception: ok = False
+        if not ok: return False
+        u = owner_user()
+        if not u: return False
+        self._send(302, b"", "text/html; charset=utf-8",
+                   {"Location": path if path.startswith("/") else "/",
+                    "Set-Cookie": self._cookie(make_token(u["login"], 365), 365*86400)})
+        return True
+
     # -- маршрутизация
     def route(self, method):
         # http.server декодирует строку запроса как latin-1 — возвращаем UTF-8
@@ -780,6 +799,7 @@ class H(BaseHTTPRequestHandler):
         path, q = p.path.rstrip("/") or "/", parse_qs(p.query)
         self.user = None
         try:
+            if method == "GET" and self._key_login(p.path or "/", q): return
             if path == "/" and method == "GET": return self.page()
             if path.startswith("/static/") and method == "GET": return self.static(path)
             if path == "/api/ping" and method == "GET":
@@ -790,7 +810,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/logout" and method == "POST":
                 return self._send(200, {"ok": True}, headers={"Set-Cookie": self._cookie("", 0)})
             if path == "/api/me" and method == "GET":
-                return self._send(200, {**user, "version": VERSION, "auth": AUTH, "cloud": IS_PG})
+                return self._send(200, {**user, "version": VERSION, "auth": AUTH, "cloud": IS_PG, **self._link(user)})
             if path == "/api/password" and method == "POST": return self.password_change(self._body())
             if self.helper and (method == "DELETE" or any(path.startswith(x) for x in HELPER_DENY)
                                 or (path == "/api/settings" and method != "GET")
@@ -891,7 +911,9 @@ class H(BaseHTTPRequestHandler):
                  "webmanifest": "application/manifest+json"}
         ext = name.rsplit(".", 1)[-1] if "." in name else ""
         if name == "manifest.webmanifest":
-            data = json.dumps({"name": "Китай · учёт", "short_name": "Китай", "start_url": "/", "display": "standalone",
+            # start_url намеренно не указан: тогда иконка на домашнем экране запоминает тот адрес,
+            # с которого её добавили — вместе с ключом входа, и приложение открывается сразу.
+            data = json.dumps({"name": "Китай · учёт", "short_name": "Китай", "display": "standalone",
                                "background_color": "#06070C", "theme_color": "#06070C",
                                "icons": [{"src": "/static/icon.png", "sizes": "180x180", "type": "image/png"}]}, ensure_ascii=False)
             return self._send(200, data.encode(), types["webmanifest"])
@@ -906,7 +928,7 @@ class H(BaseHTTPRequestHandler):
         if not u: time.sleep(0.6); return self._err(403, "Неверный логин или пароль")
         tok = make_token(u["login"])
         self._send(200, {"ok": True, "user": {"id": u["id"], "login": u["login"], "role": u["role"], "name": u["name"],
-                                              "version": VERSION, "auth": AUTH, "cloud": IS_PG}},
+                                              "version": VERSION, "auth": AUTH, "cloud": IS_PG, **self._link(u)}},
                    headers={"Set-Cookie": self._cookie(tok, 30*86400)})
 
     def password_change(self, b):

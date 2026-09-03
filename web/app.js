@@ -1155,7 +1155,10 @@ async function renderSettings(){
       <div class="stat"><span class="l">Закрыть окно</span><span class="v"><kbd>Esc</kbd></span></div>
       <div class="stat"><span class="l">Разделы по порядку</span><span class="v"><kbd>1</kbd><kbd>2</kbd>…<kbd>6</kbd></span></div></div></div>
     <div class="glass card spot" style="--i:5"><h3>На телефон</h3>
-      <div class="stat"><span class="l wrap">Откройте адрес программы в Safari на iPhone → «Поделиться» → «На экран Домой». Откроется как приложение со своей иконкой, без адресной строки.</span></div></div>
+      ${u?.link?`<div class="stat"><span class="l wrap">Ваша личная ссылка входа — открыли один раз, и пароль больше не спрашивается (устройство помнит вас год):</span></div>
+      <div class="linkbox"><code id="ph-link">${esc(location.origin+u.link)}</code><button class="ghost sm" id="ph-copy">Скопировать</button></div>
+      <div class="stat"><span class="l wrap">На iPhone: откройте её в Safari → «Поделиться» → «На экран Домой». Появится иконка, программа будет открываться сразу.<br><small style="color:var(--dim)">Ссылка заменяет пароль — не пересылайте её посторонним.</small></span></div>`
+      :`<div class="stat"><span class="l wrap">Откройте адрес программы в Safari на iPhone → «Поделиться» → «На экран Домой». Откроется как приложение со своей иконкой, без адресной строки.</span></div>`}</div>
    </div></div>`;
   if(m){
     const saveSt=async()=>{try{S.settings=await api("/api/settings",{method:"PATCH",body:{currency:$("#st-cur").value,rate:$("#st-rate").value}});toast("Настройки сохранены","ok")}catch(e){toast(e.message,"err")}};
@@ -1170,6 +1173,10 @@ async function renderSettings(){
       catch(err){toast(err.message,"err")}};
     if(u?.auth){loadUsers();$("#u-add").onclick=()=>userModal()}
   }
+  if($("#ph-copy"))$("#ph-copy").onclick=async()=>{
+    const t=$("#ph-link").textContent;
+    try{await navigator.clipboard.writeText(t);toast("Ссылка скопирована","ok")}
+    catch(e){const r=document.createRange();r.selectNode($("#ph-link"));getSelection().removeAllRanges();getSelection().addRange(r);toast("Ссылка выделена — скопируйте ⌘C","info")}};
   if($("#pw-btn"))$("#pw-btn").onclick=passwordModal;
   if($("#out"))$("#out").onclick=async()=>{await api("/api/logout",{method:"POST"});location.reload()};
 }
