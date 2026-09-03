@@ -3,6 +3,8 @@
 """
 Китай · учёт — программа учёта закупок товаров из Китая.
 Этап 1: партии с вложенными товарами, справочники, статусы, авансы.
+Этап 2: платежи поставщикам, автоматический аванс по платежам, долги,
+        карточка поставщика, серии по месяцам для мини-графиков.
 Стандартная библиотека Python, база SQLite. Локально: http://localhost:8902
 Схема таблиц повторяет ТЗ (Postgres/Supabase) — миграция в облако механическая.
 """
@@ -11,6 +13,7 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+VERSION = "2.0.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -47,7 +50,7 @@ CREATE TABLE IF NOT EXISTS shipments(
   supplier_id INTEGER NOT NULL REFERENCES partners(id),
   currency TEXT NOT NULL DEFAULT 'USD',
   rate REAL,
-  prepaid REAL NOT NULL DEFAULT 0,
+  prepaid REAL NOT NULL DEFAULT 0,               -- ручной аванс (пока нет платежей)
   status TEXT NOT NULL DEFAULT 'new',            -- new|shipping|arrived|cancelled
   sent_date TEXT, arrived_date TEXT, eta_date TEXT,
   track TEXT, default_store_id INTEGER REFERENCES stores(id),
@@ -96,6 +99,9 @@ CREATE INDEX IF NOT EXISTS idx_sh_supplier ON shipments(supplier_id);
 CREATE INDEX IF NOT EXISTS idx_sh_status ON shipments(status);
 CREATE INDEX IF NOT EXISTS idx_it_shipment ON shipment_items(shipment_id);
 CREATE INDEX IF NOT EXISTS idx_it_store ON shipment_items(store_id);
+CREATE INDEX IF NOT EXISTS idx_pay_supplier ON payments(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_pay_shipment ON payments(shipment_id);
+CREATE INDEX IF NOT EXISTS idx_pay_date ON payments(date);
 """
 
 def db():
@@ -109,9 +115,16 @@ def db():
 def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 def today(): return date.today().isoformat()
 
+def migrate(c):
+    """Добавляем колонки, которых нет в старых базах (без потери данных)."""
+    cols = [r["name"] for r in c.execute("PRAGMA table_info(payments)")]
+    if "created_at" not in cols:
+        c.execute("ALTER TABLE payments ADD COLUMN created_at TEXT")
+
 def init_db():
     c = db()
     c.executescript(SCHEMA)
+    migrate(c)
     if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         salt = secrets.token_hex(16)
         h = hashlib.pbkdf2_hmac("sha256", b"china2026", bytes.fromhex(salt), 200_000).hex()
@@ -162,9 +175,19 @@ def check_password(login, password):
     return dict(u) if hmac.compare_digest(h, u["pw_hash"]) else None
 
 # ---------------------------------------------------------------- бизнес-логика
-def shipment_amount(c, sid):
-    r = c.execute("SELECT COALESCE(SUM(amount),0) s FROM shipment_items WHERE shipment_id=?", (sid,)).fetchone()
-    return r["s"] or 0
+VALID_STATUS = ("new", "shipping", "arrived", "cancelled")
+VALID_KIND   = ("prepay", "final", "refund")
+
+def signed(p):
+    """Платёж со знаком: возврат уменьшает отданное."""
+    a = float(p["amount"] or 0)
+    return -a if p["kind"] == "refund" else a
+
+def r2(x): return round(float(x or 0), 2)
+
+def payments_of_shipment(c, sid):
+    return [dict(r) for r in c.execute(
+        "SELECT * FROM payments WHERE shipment_id=? ORDER BY date, id", (sid,))]
 
 def pack_shipment(c, row):
     d = dict(row)
@@ -173,8 +196,14 @@ def pack_shipment(c, row):
            FROM shipment_items i JOIN stores s ON s.id=i.store_id
            WHERE i.shipment_id=? ORDER BY i.id""", (d["id"],))]
     d["items"] = items
-    d["amount"] = round(sum(i["amount"] or 0 for i in items), 2)
-    d["balance"] = round(d["amount"] - (d["prepaid"] or 0), 2)
+    d["amount"] = r2(sum(i["amount"] or 0 for i in items))
+    # деньги: если по партии есть платежи — аванс считается по ним, иначе ручное поле
+    pays = payments_of_shipment(c, d["id"])
+    d["payments"] = pays
+    d["paid_by_payments"] = r2(sum(signed(p) for p in pays))
+    d["pay_mode"] = "auto" if pays else "manual"
+    d["paid"] = d["paid_by_payments"] if pays else r2(d["prepaid"])
+    d["balance"] = r2(d["amount"] - d["paid"])
     sup = c.execute("SELECT name, city FROM partners WHERE id=?", (d["supplier_id"],)).fetchone()
     d["supplier_name"] = sup["name"] if sup else "?"
     d["supplier_city"] = (sup["city"] or "") if sup else ""
@@ -185,7 +214,32 @@ def pack_shipment(c, row):
         d["days_transit"] = None
     return d
 
-VALID_STATUS = ("new", "shipping", "arrived", "cancelled")
+def paid_for_debt(s):
+    """Сколько денег реально ушло поставщику по партии (для долга).
+    Платежи считаются всегда; ручной аванс — только по живым партиям."""
+    if s["pay_mode"] == "auto": return s["paid_by_payments"]
+    return s["paid"] if s["status"] != "cancelled" else 0.0
+
+def unlinked_payments(c, pid):
+    """Платежи поставщику без партии (или по удалённой партии)."""
+    r = c.execute("""SELECT COALESCE(SUM(CASE WHEN y.kind='refund' THEN -y.amount ELSE y.amount END),0) s, COUNT(*) n
+                     FROM payments y LEFT JOIN shipments s ON s.id=y.shipment_id
+                     WHERE y.supplier_id=? AND (y.shipment_id IS NULL OR s.deleted=1)""", (pid,)).fetchone()
+    return r2(r["s"]), r["n"]
+
+def supplier_finance(c, pid, ships=None):
+    if ships is None:
+        ships = [pack_shipment(c, r) for r in
+                 c.execute("SELECT * FROM shipments WHERE supplier_id=? AND deleted=0", (pid,))]
+    live = [s for s in ships if s["status"] != "cancelled"]
+    total = r2(sum(s["amount"] for s in live))
+    linked = sum(paid_for_debt(s) for s in ships)
+    unl, unl_n = unlinked_payments(c, pid)
+    paid = r2(linked + unl)
+    npay = c.execute("SELECT COUNT(*) n FROM payments WHERE supplier_id=?", (pid,)).fetchone()["n"]
+    return {"shipments": len(ships), "total": total, "paid": paid, "debt": r2(total - paid),
+            "transit": r2(sum(s["amount"] for s in ships if s["status"] == "shipping")),
+            "unlinked": unl, "payments": npay}
 
 def validate_shipment(body, c):
     errs = []
@@ -210,9 +264,18 @@ def apply_status_dates(body, old=None):
         body["arrived_date"] = today()
     return body
 
+def month_keys(n=7):
+    cur = date.today().replace(day=1)
+    out = []
+    for k in range(n - 1, -1, -1):
+        m = (cur.month - k - 1) % 12 + 1
+        y = cur.year + (cur.month - k - 1) // 12
+        out.append("%04d-%02d" % (y, m))
+    return out
+
 # ---------------------------------------------------------------- HTTP
 class H(BaseHTTPRequestHandler):
-    server_version = "ChinaUchet/1.0"
+    server_version = "ChinaUchet/" + VERSION
     def log_message(self, fmt, *a): pass
 
     # -- helpers
@@ -248,14 +311,15 @@ class H(BaseHTTPRequestHandler):
         path, q = p.path.rstrip("/") or "/", parse_qs(p.query)
         try:
             if path == "/" and method == "GET": return self.page()
+            if path.startswith("/static/") and method == "GET": return self.static(path)
             if path == "/api/login" and method == "POST": return self.api_login()
             user = self._user()
             if path.startswith("/api/") and not user: return self._err(401, "Нужен вход")
             if path == "/api/logout" and method == "POST":
                 return self._send(200, {"ok": True}, headers={"Set-Cookie": "kn_session=; Max-Age=0; Path=/"})
-            if path == "/api/me" and method == "GET": return self._send(200, user)
+            if path == "/api/me" and method == "GET": return self._send(200, {**user, "version": VERSION})
 
-            m_id = re.match(r"^/api/(stores|partners|shipments)/(\d+)$", path)
+            m_id = re.match(r"^/api/(stores|partners|shipments|payments)/(\d+)$", path)
             if path == "/api/stores":
                 if method == "GET": return self.stores_list(q)
                 if method == "POST": return self.store_save(self._body())
@@ -266,8 +330,10 @@ class H(BaseHTTPRequestHandler):
                 if method == "GET": return self.partners_list(q)
                 if method == "POST": return self.partner_save(self._body())
             if m_id and m_id.group(1) == "partners":
-                if method == "PATCH": return self.partner_save(self._body(), int(m_id.group(2)))
-                if method == "DELETE": return self.partner_delete(int(m_id.group(2)))
+                pid = int(m_id.group(2))
+                if method == "GET": return self.partner_one(pid)
+                if method == "PATCH": return self.partner_save(self._body(), pid)
+                if method == "DELETE": return self.partner_delete(pid)
             if path == "/api/shipments":
                 if method == "GET": return self.shipments_list(q)
                 if method == "POST": return self.shipment_save(self._body())
@@ -276,8 +342,16 @@ class H(BaseHTTPRequestHandler):
                 if method == "GET": return self.shipment_one(sid)
                 if method == "PATCH": return self.shipment_save(self._body(), sid)
                 if method == "DELETE": return self.shipment_delete(sid)
+            if path == "/api/payments":
+                if method == "GET": return self.payments_list(q)
+                if method == "POST": return self.payment_save(self._body())
+            if m_id and m_id.group(1) == "payments":
+                yid = int(m_id.group(2))
+                if method == "PATCH": return self.payment_save(self._body(), yid)
+                if method == "DELETE": return self.payment_delete(yid)
             if path == "/api/summary" and method == "GET": return self.summary(q)
             if path == "/api/export.csv" and method == "GET": return self.export_csv(q)
+            if path == "/api/payments.csv" and method == "GET": return self.export_payments_csv(q)
             if path == "/api/backup" and method == "POST":
                 dst = backup_db(); return self._send(200, {"ok": True, "file": os.path.basename(dst or "")})
             return self._err(404, "Нет такого адреса")
@@ -290,11 +364,20 @@ class H(BaseHTTPRequestHandler):
     def do_PATCH(self): self.route("PATCH")
     def do_DELETE(self): self.route("DELETE")
 
-    # -- страница
+    # -- страница и статика
     def page(self):
-        try: html = open(os.path.join(WEB, "index.html"), "rb").read()
+        try: html = open(os.path.join(WEB, "index.html"), "rb").read().decode("utf-8")
         except Exception: return self._err(500, "Нет web/index.html")
-        self._send(200, html, "text/html; charset=utf-8")
+        self._send(200, html.replace("{{v}}", VERSION).encode("utf-8"), "text/html; charset=utf-8")
+
+    def static(self, path):
+        name = os.path.basename(path)
+        types = {"css": "text/css; charset=utf-8", "js": "application/javascript; charset=utf-8",
+                 "svg": "image/svg+xml", "png": "image/png", "json": "application/json; charset=utf-8"}
+        ext = name.rsplit(".", 1)[-1] if "." in name else ""
+        fp = os.path.join(WEB, name)
+        if ext not in types or not os.path.isfile(fp): return self._err(404, "Нет файла")
+        self._send(200, open(fp, "rb").read(), types[ext])
 
     # -- вход
     def api_login(self):
@@ -302,7 +385,7 @@ class H(BaseHTTPRequestHandler):
         u = check_password((b.get("login") or "").strip().lower(), b.get("password") or "")
         if not u: return self._err(403, "Неверный логин или пароль")
         tok = make_token(u["login"])
-        self._send(200, {"ok": True, "user": {"login": u["login"], "role": u["role"], "name": u["name"]}},
+        self._send(200, {"ok": True, "user": {"login": u["login"], "role": u["role"], "name": u["name"], "version": VERSION}},
                    headers={"Set-Cookie": "kn_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax" % (tok, 30*86400)})
 
     # -- магазины
@@ -316,7 +399,7 @@ class H(BaseHTTPRequestHandler):
             tr = c.execute("""SELECT COALESCE(SUM(i.amount),0) s FROM shipment_items i
                               JOIN shipments p ON p.id=i.shipment_id
                               WHERE i.store_id=? AND p.deleted=0 AND p.status='shipping'""", (r["id"],)).fetchone()
-            r.update(shipments=st["sh"], items=st["it"], total=round(st["s"],2), transit=round(tr["s"],2))
+            r.update(shipments=st["sh"], items=st["it"], total=r2(st["s"]), transit=r2(tr["s"]))
         c.close(); self._send(200, rows)
 
     def store_save(self, b, sid=None):
@@ -345,19 +428,23 @@ class H(BaseHTTPRequestHandler):
         c = db()
         rows = [dict(r) for r in c.execute("SELECT * FROM partners ORDER BY active DESC, name")]
         for r in rows:
-            st = c.execute("""SELECT COUNT(*) n FROM shipments WHERE supplier_id=? AND deleted=0""", (r["id"],)).fetchone()
-            fin = c.execute("""SELECT COALESCE(SUM(i.amount),0) s, COALESCE(SUM(DISTINCT 0),0) z
-                               FROM shipments p LEFT JOIN shipment_items i ON i.shipment_id=p.id
-                               WHERE p.supplier_id=? AND p.deleted=0 AND p.status!='cancelled'""", (r["id"],)).fetchone()
-            pre = c.execute("""SELECT COALESCE(SUM(prepaid),0) s FROM shipments
-                               WHERE supplier_id=? AND deleted=0 AND status!='cancelled'""", (r["id"],)).fetchone()
-            tr  = c.execute("""SELECT COALESCE(SUM(i.amount),0) s FROM shipments p
-                               JOIN shipment_items i ON i.shipment_id=p.id
-                               WHERE p.supplier_id=? AND p.deleted=0 AND p.status='shipping'""", (r["id"],)).fetchone()
-            total = round(fin["s"], 2)
-            r.update(shipments=st["n"], total=total, prepaid=round(pre["s"],2),
-                     debt=round(total - pre["s"], 2), transit=round(tr["s"],2))
+            r.update(supplier_finance(c, r["id"]))
         c.close(); self._send(200, rows)
+
+    def partner_one(self, pid):
+        c = db()
+        p = c.execute("SELECT * FROM partners WHERE id=?", (pid,)).fetchone()
+        if not p: c.close(); return self._err(404, "Контрагент не найден")
+        ships = [pack_shipment(c, r) for r in c.execute(
+            "SELECT * FROM shipments WHERE supplier_id=? AND deleted=0 ORDER BY date DESC, id DESC", (pid,))]
+        fin = supplier_finance(c, pid, ships)
+        pays = [dict(r) for r in c.execute(
+            """SELECT y.*, s.date ship_date, s.status ship_status, s.deleted ship_deleted,
+                      (SELECT COALESCE(SUM(amount),0) FROM shipment_items WHERE shipment_id=s.id) ship_amount
+               FROM payments y LEFT JOIN shipments s ON s.id=y.shipment_id
+               WHERE y.supplier_id=? ORDER BY y.date DESC, y.id DESC""", (pid,))]
+        c.close()
+        self._send(200, {**dict(p), **fin, "shipments": ships, "payments_list": pays})
 
     def partner_save(self, b, pid=None):
         if not (b.get("name") or "").strip(): return self._err(400, "Не указано название")
@@ -375,11 +462,12 @@ class H(BaseHTTPRequestHandler):
 
     def partner_delete(self, pid):
         c = db()
-        used = c.execute("SELECT 1 FROM shipments WHERE supplier_id=? AND deleted=0 LIMIT 1", (pid,)).fetchone()
+        used = c.execute("SELECT 1 FROM shipments WHERE supplier_id=? AND deleted=0 LIMIT 1", (pid,)).fetchone() \
+            or c.execute("SELECT 1 FROM payments WHERE supplier_id=? LIMIT 1", (pid,)).fetchone()
         if used:
             c.execute("UPDATE partners SET active=0 WHERE id=?", (pid,)); c.commit(); c.close()
             return self._send(200, {"ok": True, "hidden": True,
-                                    "msg": "У контрагента есть партии — скрыт, история сохранена"})
+                                    "msg": "У контрагента есть партии или платежи — скрыт, история сохранена"})
         c.execute("DELETE FROM partners WHERE id=?", (pid,)); c.commit(); c.close()
         self._send(200, {"ok": True})
 
@@ -406,11 +494,12 @@ class H(BaseHTTPRequestHandler):
         where, args = self._ship_where(q)
         rows = c.execute("SELECT p.* FROM shipments p WHERE %s ORDER BY p.date DESC, p.id DESC" % where, args).fetchall()
         out = [pack_shipment(c, r) for r in rows]
+        live = [s for s in out if s["status"] != "cancelled"]
         tot = {"count": len(out),
                "items": sum(len(s["items"]) for s in out),
-               "amount": round(sum(s["amount"] for s in out if s["status"] != "cancelled"), 2),
-               "prepaid": round(sum(s["prepaid"] or 0 for s in out if s["status"] != "cancelled"), 2)}
-        tot["balance"] = round(tot["amount"] - tot["prepaid"], 2)
+               "amount": r2(sum(s["amount"] for s in live)),
+               "paid": r2(sum(s["paid"] for s in live))}
+        tot["balance"] = r2(tot["amount"] - tot["paid"])
         c.close(); self._send(200, {"rows": out, "totals": tot})
 
     def shipment_one(self, sid):
@@ -466,49 +555,146 @@ class H(BaseHTTPRequestHandler):
         c.execute("UPDATE shipments SET deleted=1, updated_at=? WHERE id=?", (now(), sid))
         c.commit(); c.close(); self._send(200, {"ok": True})
 
+    # -- платежи (этап 2)
+    def _pay_where(self, q):
+        w, args = ["1=1"], []
+        if q.get("supplier"): w.append("y.supplier_id=?"); args.append(q["supplier"][0])
+        if q.get("shipment"): w.append("y.shipment_id=?"); args.append(q["shipment"][0])
+        if q.get("kind"): w.append("y.kind=?"); args.append(q["kind"][0])
+        if q.get("from"): w.append("y.date>=?"); args.append(q["from"][0])
+        if q.get("to"): w.append("y.date<=?"); args.append(q["to"][0])
+        if q.get("q"):
+            like = "%" + q["q"][0].lower() + "%"
+            w.append("""(plower(COALESCE(y.note,'')) LIKE ? OR plower(COALESCE(y.method,'')) LIKE ?
+                         OR plower(pa.name) LIKE ?)""")
+            args += [like, like, like]
+        return " AND ".join(w), args
+
+    PAY_SQL = """SELECT y.*, pa.name supplier_name, s.date ship_date, s.status ship_status, s.deleted ship_deleted,
+                        (SELECT COALESCE(SUM(amount),0) FROM shipment_items WHERE shipment_id=s.id) ship_amount
+                 FROM payments y JOIN partners pa ON pa.id=y.supplier_id
+                 LEFT JOIN shipments s ON s.id=y.shipment_id"""
+
+    def payments_list(self, q):
+        c = db()
+        where, args = self._pay_where(q)
+        rows = [dict(r) for r in c.execute(self.PAY_SQL + " WHERE %s ORDER BY y.date DESC, y.id DESC" % where, args)]
+        given = r2(sum(p["amount"] for p in rows if p["kind"] != "refund"))
+        refund = r2(sum(p["amount"] for p in rows if p["kind"] == "refund"))
+        by_kind = {k: r2(sum(p["amount"] for p in rows if p["kind"] == k)) for k in VALID_KIND}
+        c.close()
+        self._send(200, {"rows": rows, "totals": {"count": len(rows), "given": given, "refund": refund,
+                                                  "net": r2(given - refund), "by_kind": by_kind}})
+
+    def payment_save(self, b, yid=None):
+        c = db()
+        errs = []
+        if not b.get("date"): errs.append("Не указана дата платежа")
+        sup = b.get("supplier_id")
+        if not sup: errs.append("Не выбран поставщик")
+        elif not c.execute("SELECT 1 FROM partners WHERE id=?", (sup,)).fetchone(): errs.append("Такого поставщика нет")
+        try: amount = float(b.get("amount") or 0)
+        except Exception: amount = 0
+        if amount <= 0: errs.append("Сумма должна быть больше нуля")
+        kind = b.get("kind") or "prepay"
+        if kind not in VALID_KIND: errs.append("Неверный тип платежа")
+        ship = b.get("shipment_id") or None
+        if ship:
+            s = c.execute("SELECT supplier_id, deleted FROM shipments WHERE id=?", (ship,)).fetchone()
+            if not s or s["deleted"]: errs.append("Партия не найдена")
+            elif str(s["supplier_id"]) != str(sup): errs.append("Партия принадлежит другому поставщику")
+        if errs: c.close(); return self._err(400, "; ".join(errs))
+        vals = (b["date"], int(sup), int(ship) if ship else None, round(amount, 2), b.get("currency") or "USD",
+                kind, (b.get("method") or "").strip(), (b.get("note") or "").strip())
+        # первый платёж по партии с ручным авансом: переносим аванс в платежи, чтобы ничего не потерялось
+        converted = 0
+        if ship and not yid:
+            s = c.execute("SELECT prepaid, date, currency FROM shipments WHERE id=?", (ship,)).fetchone()
+            has = c.execute("SELECT 1 FROM payments WHERE shipment_id=? LIMIT 1", (ship,)).fetchone()
+            if not has and float(s["prepaid"] or 0) > 0:
+                converted = r2(s["prepaid"])
+                c.execute("""INSERT INTO payments(date,supplier_id,shipment_id,amount,currency,kind,method,note,created_at)
+                             VALUES(?,?,?,?,?,?,?,?,?)""",
+                          (s["date"], int(sup), int(ship), converted, s["currency"] or "USD", "prepay", "",
+                           "Аванс из карточки партии (перенесён автоматически)", now()))
+                c.execute("UPDATE shipments SET prepaid=0, updated_at=? WHERE id=?", (now(), ship))
+        if yid:
+            if not c.execute("SELECT 1 FROM payments WHERE id=?", (yid,)).fetchone():
+                c.close(); return self._err(404, "Платёж не найден")
+            c.execute("""UPDATE payments SET date=?,supplier_id=?,shipment_id=?,amount=?,currency=?,kind=?,method=?,note=?
+                         WHERE id=?""", vals + (yid,))
+        else:
+            yid = c.execute("""INSERT INTO payments(date,supplier_id,shipment_id,amount,currency,kind,method,note,created_at)
+                               VALUES(?,?,?,?,?,?,?,?,?)""", vals + (now(),)).lastrowid
+        c.commit()
+        row = dict(c.execute(self.PAY_SQL + " WHERE y.id=?", (yid,)).fetchone())
+        row["converted"] = converted
+        c.close(); self._send(200, row)
+
+    def payment_delete(self, yid):
+        c = db()
+        if not c.execute("SELECT 1 FROM payments WHERE id=?", (yid,)).fetchone():
+            c.close(); return self._err(404, "Платёж не найден")
+        c.execute("DELETE FROM payments WHERE id=?", (yid,)); c.commit(); c.close()
+        self._send(200, {"ok": True})
+
     # -- сводка
     def summary(self, q):
         c = db()
-        where, args = self._ship_where(q)
-        rows = [pack_shipment(c, r) for r in
-                c.execute("SELECT p.* FROM shipments p WHERE %s" % where, args)]
+        rows = [pack_shipment(c, r) for r in c.execute("SELECT p.* FROM shipments p WHERE p.deleted=0")]
         live = [s for s in rows if s["status"] != "cancelled"]
         transit = [s for s in rows if s["status"] == "shipping"]
+        sups = c.execute("SELECT id, name FROM partners WHERE is_supplier=1 OR id IN (SELECT DISTINCT supplier_id FROM shipments)").fetchall()
+        by_sup = {s["id"]: s["name"] for s in sups}
+        fin = {}
+        for pid in by_sup:
+            fin[pid] = supplier_finance(c, pid, [s for s in rows if s["supplier_id"] == pid])
+        ordered = r2(sum(s["amount"] for s in live))
+        paid = r2(sum(f["paid"] for f in fin.values()))
+        debts = sorted(((by_sup[p], f["debt"]) for p, f in fin.items() if f["debt"] > 0.004), key=lambda x: -x[1])
+        overpaid = sorted(((by_sup[p], -f["debt"]) for p, f in fin.items() if f["debt"] < -0.004), key=lambda x: -x[1])
         tiles = {
-            "ordered": round(sum(s["amount"] for s in live), 2),
-            "ordered_items": sum(len(s["items"]) for s in live),
-            "ordered_count": len(live),
-            "prepaid": round(sum(s["prepaid"] or 0 for s in live), 2),
-            "balance": 0, "debt_suppliers": 0,
-            "transit": round(sum(s["amount"] for s in transit), 2),
-            "transit_count": len(transit),
+            "ordered": ordered, "ordered_items": sum(len(s["items"]) for s in live), "ordered_count": len(live),
+            "paid": paid, "balance": r2(ordered - paid),
+            "debt_suppliers": len(debts), "debt_total": r2(sum(v for _, v in debts)),
+            "transit": r2(sum(s["amount"] for s in transit)), "transit_count": len(transit),
             "transit_max_days": max([s["days_transit"] or 0 for s in transit], default=0),
         }
-        tiles["balance"] = round(tiles["ordered"] - tiles["prepaid"], 2)
-        debts = {}
+        # серии по месяцам (7 последних) — для мини-графиков и столбиков
+        keys = month_keys(7)
+        pays = [dict(r) for r in c.execute("SELECT * FROM payments")]
+        series = {"ordered": [], "paid": [], "balance": [], "sent": []}
+        months = []
+        for ym in keys:
+            o = r2(sum(s["amount"] for s in live if s["date"][:7] == ym))
+            p = r2(sum(signed(y) for y in pays if (y["date"] or "")[:7] == ym)
+                   + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] == ym))
+            snt = r2(sum(s["amount"] for s in live if (s["sent_date"] or "")[:7] == ym))
+            series["ordered"].append(o); series["paid"].append(p)
+            series["balance"].append(r2(o - p)); series["sent"].append(snt)
+            months.append({"ym": ym, "total": o, "paid": p})
+        by_status = {st: {"count": len([s for s in rows if s["status"] == st]),
+                          "amount": r2(sum(s["amount"] for s in rows if s["status"] == st))} for st in VALID_STATUS}
+        top_sup = sorted(((by_sup[p], f["total"], f["debt"]) for p, f in fin.items() if f["total"] > 0),
+                         key=lambda x: -x[1])[:6]
+        by_store = {}
         for s in live:
-            if s["balance"] > 0.004:
-                debts[s["supplier_name"]] = round(debts.get(s["supplier_name"], 0) + s["balance"], 2)
-        tiles["debt_suppliers"] = len(debts)
-        # последние 7 месяцев — по всем партиям (не по фильтру периода)
-        allrows = c.execute("""SELECT substr(p.date,1,7) ym, COALESCE(SUM(i.amount),0) s
-                               FROM shipments p JOIN shipment_items i ON i.shipment_id=p.id
-                               WHERE p.deleted=0 AND p.status!='cancelled'
-                               GROUP BY ym ORDER BY ym""").fetchall()
-        by_ym = {r["ym"]: round(r["s"], 2) for r in allrows}
-        months, cur = [], date.today().replace(day=1)
-        for k in range(6, -1, -1):
-            m = (cur.month - k - 1) % 12 + 1
-            y = cur.year + (cur.month - k - 1) // 12
-            ym = "%04d-%02d" % (y, m)
-            months.append({"ym": ym, "total": by_ym.get(ym, 0)})
-        arriving = sorted(transit, key=lambda s: s["sent_date"] or "9999")
+            for i in s["items"]:
+                k = "№" + i["store_number"] + (" · " + i["store_name"] if i["store_name"] else "")
+                by_store[k] = r2(by_store.get(k, 0) + (i["amount"] or 0))
+        by_store = sorted(by_store.items(), key=lambda x: -x[1])
+        recent = [dict(r) for r in c.execute(self.PAY_SQL + " ORDER BY y.date DESC, y.id DESC LIMIT 6")]
+        this_month = today()[:7]
+        month_paid = r2(sum(signed(y) for y in pays if (y["date"] or "")[:7] == this_month))
+        arriving = sorted(transit, key=lambda s: s["eta_date"] or s["sent_date"] or "9999")
         c.close()
-        self._send(200, {"tiles": tiles,
-                         "debts": sorted(debts.items(), key=lambda x: -x[1]),
-                         "months": months,
+        self._send(200, {"tiles": tiles, "series": series, "months": months, "by_status": by_status,
+                         "top_suppliers": top_sup, "by_store": by_store, "recent_payments": recent,
+                         "month_paid": month_paid, "payments_count": len(pays),
+                         "debts": debts, "overpaid": overpaid,
                          "arriving": [{"id": s["id"], "supplier": s["supplier_name"], "eta": s["eta_date"],
-                                       "days": s["days_transit"], "amount": s["amount"]} for s in arriving]})
+                                       "days": s["days_transit"], "amount": s["amount"], "sent": s["sent_date"]}
+                                      for s in arriving]})
 
     # -- экспорт
     def export_csv(self, q):
@@ -521,16 +707,32 @@ class H(BaseHTTPRequestHandler):
         w = csv.writer(buf, delimiter=";")
         st_ru = {"new": "Не отправлен", "shipping": "В пути", "arrived": "Прибыл", "cancelled": "Отменён"}
         w.writerow(["Дата","Поставщик","Статус","Трек","Магазин","Товар","Кол-во","Ед.","Цена","Сумма",
-                    "Валюта","Аванс партии","Сумма партии","Комментарий"])
+                    "Валюта","Оплачено по партии","Остаток по партии","Сумма партии","Комментарий"])
         for s in rows:
             for i in s["items"]:
                 w.writerow([s["date"], s["supplier_name"], st_ru.get(s["status"], s["status"]), s["track"] or "",
                             "№" + i["store_number"], i["product"], i["qty"] or "", i["unit"] or "",
-                            i["unit_price"] or "", i["amount"], s["currency"], s["prepaid"] or 0,
+                            i["unit_price"] or "", i["amount"], s["currency"], s["paid"], s["balance"],
                             s["amount"], (i["note"] or s["note"] or "")])
         data = "﻿" + buf.getvalue()
         self._send(200, data.encode("utf-8"), "text/csv; charset=utf-8",
                    {"Content-Disposition": "attachment; filename=china-uchet.csv"})
+
+    def export_payments_csv(self, q):
+        c = db()
+        where, args = self._pay_where(q)
+        rows = [dict(r) for r in c.execute(self.PAY_SQL + " WHERE %s ORDER BY y.date DESC, y.id DESC" % where, args)]
+        c.close()
+        buf = io.StringIO(); w = csv.writer(buf, delimiter=";")
+        kind_ru = {"prepay": "Аванс", "final": "Доплата", "refund": "Возврат"}
+        w.writerow(["Дата","Поставщик","Тип","Сумма","Валюта","Партия от","Сумма партии","Способ","Комментарий"])
+        for p in rows:
+            w.writerow([p["date"], p["supplier_name"], kind_ru.get(p["kind"], p["kind"]),
+                        -p["amount"] if p["kind"] == "refund" else p["amount"], p["currency"],
+                        p["ship_date"] or "", p["ship_amount"] if p["ship_date"] else "", p["method"] or "", p["note"] or ""])
+        data = "﻿" + buf.getvalue()
+        self._send(200, data.encode("utf-8"), "text/csv; charset=utf-8",
+                   {"Content-Disposition": "attachment; filename=china-platezhi.csv"})
 
 def main():
     global SECRET
@@ -539,7 +741,7 @@ def main():
     b = backup_db()
     if b: print("Резервная копия:", os.path.basename(b))
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
-    print("Китай · учёт работает: http://localhost:%d" % PORT)
+    print("Китай · учёт %s работает: http://localhost:%d" % (VERSION, PORT))
     srv.serve_forever()
 
 if __name__ == "__main__":
