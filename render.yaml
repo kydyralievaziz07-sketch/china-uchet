@@ -33,6 +33,8 @@ services:
         sync: false
       - key: KN_TG_HOOK_URL        # https://china-uchet.onrender.com/api/tg/hook
         sync: false
+      - key: KN_TG_THREAD          # необязательно: слушать только одну тему группы
+        sync: false
       - key: KN_AI_KEY             # ключ Groq: распознавание речи (whisper) + разбор смысла
         sync: false
       - key: PYTHON_VERSION

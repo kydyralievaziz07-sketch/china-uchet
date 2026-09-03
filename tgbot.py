@@ -23,6 +23,7 @@ SECRET  = (os.environ.get("KN_TG_SECRET") or "").strip()          # подпис
 ALLOW   = {s.strip() for s in (os.environ.get("KN_TG_ALLOW") or "").split(",") if s.strip()}
 HOOK_URL = (os.environ.get("KN_TG_HOOK_URL") or "").strip()       # https://…/api/tg/hook — если пусто, работаем опросом
 POLL    = os.environ.get("KN_TG_POLL") == "1"
+THREAD  = (os.environ.get("KN_TG_THREAD") or "").strip()   # id темы в группе, если нужно слушать только её
 
 AI_KEY   = (os.environ.get("KN_AI_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
 AI_BASE  = (os.environ.get("KN_AI_BASE") or "https://api.groq.com/openai/v1").rstrip("/")
@@ -652,6 +653,14 @@ def handle(u):
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if text.startswith("/") and cmd(chat, text, thread): return
     if not (voice or text): return
+    # В группе бот молчит, пока к нему не обратились: голосом, ответом на его сообщение,
+    # упоминанием или командой. Иначе он лез бы в любую переписку.
+    if msg["chat"].get("type") in ("group", "supergroup"):
+        me = "@" + (CFG.get("me") or "")
+        mine = ((msg.get("reply_to_message") or {}).get("from") or {}).get("is_bot")
+        if THREAD and str(thread or "") != THREAD: return
+        if not (voice or mine or (me != "@" and me.lower() in text.lower()) or text.startswith("/")): return
+        text = re.sub(r"@\w+", "", text).strip()
 
     react(chat, mid, "👀")
     typing(chat)
@@ -747,6 +756,7 @@ def start(cfg):
     for _ in range(2):
         threading.Thread(target=worker, daemon=True).start()
     me = (tg("getMe").get("result") or {}).get("username")
+    CFG["me"] = me
     if HOOK_URL:
         r = tg("setWebhook", url=HOOK_URL, secret_token=SECRET, allowed_updates=["message", "edited_message", "callback_query"],
                drop_pending_updates=True)
