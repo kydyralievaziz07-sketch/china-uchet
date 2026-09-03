@@ -670,8 +670,12 @@ class H(BaseHTTPRequestHandler):
             p = r2(sum(signed(y) for y in pays if (y["date"] or "")[:7] == ym)
                    + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] == ym))
             snt = r2(sum(s["amount"] for s in live if (s["sent_date"] or "")[:7] == ym))
+            # остаток к оплате — накопительно на конец месяца (как менялся долг), а не «за месяц»
+            cum_o = sum(s["amount"] for s in live if s["date"][:7] <= ym)
+            cum_p = (sum(signed(y) for y in pays if (y["date"] or "")[:7] <= ym)
+                     + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] <= ym))
             series["ordered"].append(o); series["paid"].append(p)
-            series["balance"].append(r2(o - p)); series["sent"].append(snt)
+            series["balance"].append(r2(max(0, cum_o - cum_p))); series["sent"].append(snt)
             months.append({"ym": ym, "total": o, "paid": p})
         by_status = {st: {"count": len([s for s in rows if s["status"] == st]),
                           "amount": r2(sum(s["amount"] for s in rows if s["status"] == st))} for st in VALID_STATUS}
