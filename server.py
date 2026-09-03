@@ -3,22 +3,26 @@
 """
 Китай · учёт — программа учёта закупок товаров из Китая.
 Этап 1: партии с вложенными товарами, справочники, статусы, авансы.
-Этап 2: платежи поставщикам, автоматический аванс по платежам, долги,
-        карточка поставщика, серии по месяцам для мини-графиков.
+Этап 2: платежи поставщикам, автоматический аванс по платежам, долги, карточка поставщика.
+Этап 3: фильтры по периоду / магазину / поставщику, сортировка, разделение партии, экспорт по фильтру.
+Этап 4: инвесторы — вложения, доли, выплаты, прибыль по партии, отчёт инвестору.
+Этап 5 (локальная часть): настройки, выгрузка базы, иконка на телефон; вход по паролю — только в облаке (KN_AUTH=1).
 Стандартная библиотека Python, база SQLite. Локально: http://localhost:8902
 Схема таблиц повторяет ТЗ (Postgres/Supabase) — миграция в облако механическая.
 """
-import base64, csv, hashlib, hmac, io, json, os, re, shutil, sqlite3, secrets, sys, time
+import base64, csv, hashlib, hmac, io, json, os, re, shutil, sqlite3, secrets, struct, sys, time, zlib
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "2.0.0"
+VERSION = "4.0.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
 PORT = int(os.environ.get("PORT", "8902"))
 SECRET_FILE = os.path.join(ROOT, ".secret")
+# Вход по логину и паролю нужен только облачной версии. Локально программа открывается сразу.
+AUTH = os.environ.get("KN_AUTH", "0") == "1"
 
 # ---------------------------------------------------------------- база
 SCHEMA = """
@@ -28,6 +32,9 @@ CREATE TABLE IF NOT EXISTS users(
   pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'owner',           -- owner | helper
   name TEXT, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY, value TEXT
 );
 CREATE TABLE IF NOT EXISTS partners(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +61,7 @@ CREATE TABLE IF NOT EXISTS shipments(
   status TEXT NOT NULL DEFAULT 'new',            -- new|shipping|arrived|cancelled
   sent_date TEXT, arrived_date TEXT, eta_date TEXT,
   track TEXT, default_store_id INTEGER REFERENCES stores(id),
-  profit REAL, closed_at TEXT,
+  profit REAL, closed_at TEXT,                   -- прибыль по партии вводится вручную при закрытии
   note TEXT, deleted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT, updated_at TEXT
 );
@@ -81,9 +88,9 @@ CREATE TABLE IF NOT EXISTS investments(            -- этап 4
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   date TEXT NOT NULL,
   investor_id INTEGER NOT NULL REFERENCES partners(id),
-  shipment_id INTEGER REFERENCES shipments(id),
+  shipment_id INTEGER REFERENCES shipments(id),    -- NULL = общий пул
   amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'USD',
-  terms TEXT NOT NULL DEFAULT 'share', terms_value REAL,
+  terms TEXT NOT NULL DEFAULT 'share', terms_value REAL,   -- share: % от прибыли | fixed: % в месяц
   note TEXT
 );
 CREATE TABLE IF NOT EXISTS investor_payouts(       -- этап 4
@@ -102,6 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_it_store ON shipment_items(store_id);
 CREATE INDEX IF NOT EXISTS idx_pay_supplier ON payments(supplier_id);
 CREATE INDEX IF NOT EXISTS idx_pay_shipment ON payments(shipment_id);
 CREATE INDEX IF NOT EXISTS idx_pay_date ON payments(date);
+CREATE INDEX IF NOT EXISTS idx_inv_investor ON investments(investor_id);
+CREATE INDEX IF NOT EXISTS idx_po_investor ON investor_payouts(investor_id);
 """
 
 def db():
@@ -117,9 +126,11 @@ def today(): return date.today().isoformat()
 
 def migrate(c):
     """Добавляем колонки, которых нет в старых базах (без потери данных)."""
-    cols = [r["name"] for r in c.execute("PRAGMA table_info(payments)")]
-    if "created_at" not in cols:
-        c.execute("ALTER TABLE payments ADD COLUMN created_at TEXT")
+    def cols(t): return [r["name"] for r in c.execute("PRAGMA table_info(%s)" % t)]
+    if "created_at" not in cols("payments"): c.execute("ALTER TABLE payments ADD COLUMN created_at TEXT")
+    if "end_date" not in cols("investments"): c.execute("ALTER TABLE investments ADD COLUMN end_date TEXT")
+    if "created_at" not in cols("investments"): c.execute("ALTER TABLE investments ADD COLUMN created_at TEXT")
+    if "created_at" not in cols("investor_payouts"): c.execute("ALTER TABLE investor_payouts ADD COLUMN created_at TEXT")
 
 def init_db():
     c = db()
@@ -130,7 +141,6 @@ def init_db():
         h = hashlib.pbkdf2_hmac("sha256", b"china2026", bytes.fromhex(salt), 200_000).hex()
         c.execute("INSERT INTO users(login,pw_hash,salt,role,name,created_at) VALUES(?,?,?,?,?,?)",
                   ("admin", h, salt, "owner", "Владелец", now()))
-        print("Создан пользователь: admin / china2026")
     c.commit(); c.close()
 
 def backup_db(keep=30):
@@ -142,6 +152,28 @@ def backup_db(keep=30):
         for f in old[:-keep]: os.remove(os.path.join(bdir, f))
         return dst
     return None
+
+def make_icon(path, size=180):
+    """Иконка для домашнего экрана телефона: градиент + мотив маршрута. Чистый Python, без библиотек."""
+    def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    pts = [(0.24, 0.52), (0.5, 0.52), (0.76, 0.52)]
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            t = (x + y) / (2 * size - 2)
+            r, g, b = int(0x6C + (0x3E - 0x6C) * t), int(0x8C + (0xD8 - 0x8C) * t), int(0xFF + (0xD0 - 0xFF) * t)
+            fx, fy = (x + .5) / size, (y + .5) / size
+            dark = False
+            if pts[0][0] <= fx <= pts[2][0] and abs(fy - 0.52) < 0.022: dark = True
+            for px, py in pts:
+                if (fx - px) ** 2 + (fy - py) ** 2 < 0.07 ** 2: dark = True
+            if dark: r, g, b = 0x06, 0x07, 0x0C
+            row += bytes((r, g, b))
+        rows.append(bytes(row))
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+    open(path, "wb").write(png)
 
 # ---------------------------------------------------------------- сессии
 def get_secret():
@@ -174,9 +206,15 @@ def check_password(login, password):
     h = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(u["salt"]), 200_000).hex()
     return dict(u) if hmac.compare_digest(h, u["pw_hash"]) else None
 
+def owner_user():
+    c = db(); u = c.execute("SELECT id,login,role,name FROM users WHERE role='owner' ORDER BY id LIMIT 1").fetchone(); c.close()
+    return dict(u) if u else None
+
 # ---------------------------------------------------------------- бизнес-логика
 VALID_STATUS = ("new", "shipping", "arrived", "cancelled")
 VALID_KIND   = ("prepay", "final", "refund")
+VALID_TERMS  = ("share", "fixed")
+VALID_PAYOUT = ("profit", "principal")
 
 def signed(p):
     """Платёж со знаком: возврат уменьшает отданное."""
@@ -185,9 +223,98 @@ def signed(p):
 
 def r2(x): return round(float(x or 0), 2)
 
+def get_settings(c):
+    s = {"currency": "USD", "rate": None}
+    for r in c.execute("SELECT key, value FROM settings"):
+        if r["key"] == "currency" and r["value"] in ("USD", "CNY", "KGS"): s["currency"] = r["value"]
+        if r["key"] == "rate":
+            try: s["rate"] = float(r["value"]) if r["value"] not in (None, "") else None
+            except Exception: pass
+    return s
+
 def payments_of_shipment(c, sid):
     return [dict(r) for r in c.execute(
         "SELECT * FROM payments WHERE shipment_id=? ORDER BY date, id", (sid,))]
+
+def months_between(a, b):
+    """Полных месяцев от даты a до даты b."""
+    if b < a: return 0
+    m = (b.year - a.year) * 12 + (b.month - a.month)
+    if b.day < a.day: m -= 1
+    return max(0, m)
+
+def pool_total(c):
+    return float(c.execute("SELECT COALESCE(SUM(amount),0) s FROM investments WHERE shipment_id IS NULL").fetchone()["s"])
+
+def pool_profit_since(c, since):
+    """Прибыль закрытых партий без адресных вложений, закрытых начиная с даты since."""
+    r = c.execute("""SELECT COALESCE(SUM(profit),0) s FROM shipments s
+                     WHERE s.deleted=0 AND s.profit IS NOT NULL AND COALESCE(s.closed_at, s.date) >= ?
+                       AND NOT EXISTS(SELECT 1 FROM investments x WHERE x.shipment_id=s.id)""", (since,)).fetchone()
+    return float(r["s"] or 0)
+
+def accrual_of(c, v, ptotal=None):
+    """Сколько начислено инвестору по одному вложению + пояснение."""
+    val = float(v["terms_value"] or 0)
+    if v["terms"] == "fixed":
+        end = date.fromisoformat(v["end_date"]) if v.get("end_date") else date.today()
+        m = months_between(date.fromisoformat(v["date"]), end)
+        return r2(float(v["amount"]) * val / 100 * m), "%d полн. мес. × %g%% в месяц" % (m, val)
+    if v.get("shipment_id"):
+        if v.get("ship_deleted"): return 0.0, "партия удалена"
+        if v.get("ship_profit") is None: return 0.0, "партия ещё не закрыта"
+        return r2(float(v["ship_profit"]) * val / 100), "%g%% от прибыли %s" % (val, r2(v["ship_profit"]))
+    pt = pool_total(c) if ptotal is None else ptotal
+    if not pt: return 0.0, "общий пул пуст"
+    frac = float(v["amount"]) / pt
+    prof = pool_profit_since(c, v["date"])
+    return r2(prof * frac * val / 100), "доля пула %.1f%% × %g%% от прибыли %s" % (frac * 100, val, r2(prof))
+
+INV_SQL = """SELECT v.*, p.name investor_name, s.date ship_date, s.status ship_status, s.profit ship_profit,
+                    s.closed_at ship_closed, s.deleted ship_deleted,
+                    (SELECT COALESCE(SUM(amount),0) FROM shipment_items WHERE shipment_id=s.id) ship_amount,
+                    (SELECT name FROM partners WHERE id=s.supplier_id) ship_supplier
+             FROM investments v JOIN partners p ON p.id=v.investor_id
+             LEFT JOIN shipments s ON s.id=v.shipment_id"""
+PO_SQL = "SELECT o.*, p.name investor_name FROM investor_payouts o JOIN partners p ON p.id=o.investor_id"
+
+def investor_calc(c, iid, with_lists=True):
+    invs = [dict(r) for r in c.execute(INV_SQL + " WHERE v.investor_id=? ORDER BY v.date DESC, v.id DESC", (iid,))]
+    pt = pool_total(c)
+    for v in invs:
+        v["accrued"], v["accrual_note"] = accrual_of(c, v, pt)
+    pays = [dict(r) for r in c.execute(PO_SQL + " WHERE o.investor_id=? ORDER BY o.date DESC, o.id DESC", (iid,))]
+    invested = r2(sum(v["amount"] for v in invs))
+    accrued = r2(sum(v["accrued"] for v in invs))
+    paid_profit = r2(sum(p["amount"] for p in pays if p["kind"] == "profit"))
+    paid_principal = r2(sum(p["amount"] for p in pays if p["kind"] == "principal"))
+    out = {"invested": invested, "accrued": accrued, "paid_profit": paid_profit, "paid_principal": paid_principal,
+           "due": r2(accrued - paid_profit), "principal_out": r2(invested - paid_principal),
+           "investments_count": len(invs), "payouts_count": len(pays),
+           "open_count": len([v for v in invs if v["terms"] == "share" and v.get("shipment_id")
+                              and v.get("ship_profit") is None and not v.get("ship_deleted")])}
+    if with_lists: out["investments"], out["payouts"] = invs, pays
+    return out
+
+def shipment_shares(c, s):
+    """Распределение прибыли закрытой партии по инвесторам (для карточки партии)."""
+    if s.get("profit") is None: return []
+    out = []
+    direct = [dict(r) for r in c.execute(INV_SQL + " WHERE v.shipment_id=?", (s["id"],))]
+    for v in direct:
+        acc, note = accrual_of(c, v)
+        out.append({"name": v["investor_name"], "investor_id": v["investor_id"], "kind": "direct", "amount": v["amount"],
+                    "terms": v["terms"], "terms_value": v["terms_value"], "accrued": acc, "note": note})
+    if not direct:
+        pt = pool_total(c)
+        if pt:
+            since = s.get("closed_at") or s["date"]
+            for v in c.execute(INV_SQL + " WHERE v.shipment_id IS NULL AND v.terms='share' AND v.date<=? ORDER BY v.date", (since,)):
+                v = dict(v); frac = float(v["amount"]) / pt
+                out.append({"name": v["investor_name"], "investor_id": v["investor_id"], "kind": "pool", "amount": v["amount"],
+                            "terms": "share", "terms_value": v["terms_value"], "accrued": r2(float(s["profit"]) * frac * float(v["terms_value"] or 0) / 100),
+                            "note": "доля пула %.1f%% × %g%%" % (frac * 100, float(v["terms_value"] or 0))})
+    return out
 
 def pack_shipment(c, row):
     d = dict(row)
@@ -212,6 +339,9 @@ def pack_shipment(c, row):
         d["days_transit"] = max(0, (date.today() - date.fromisoformat(d["sent_date"])).days)
     else:
         d["days_transit"] = None
+    d["investors"] = [dict(r) for r in c.execute(
+        "SELECT v.id, v.investor_id, p.name, v.amount, v.terms, v.terms_value FROM investments v JOIN partners p ON p.id=v.investor_id WHERE v.shipment_id=?", (d["id"],))]
+    d["shares"] = shipment_shares(c, d)
     return d
 
 def paid_for_debt(s):
@@ -273,6 +403,20 @@ def month_keys(n=7):
         out.append("%04d-%02d" % (y, m))
     return out
 
+def esc(s):
+    return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+def fmt_money(v, cur="USD"):
+    n = float(v or 0)
+    s = "{:,.2f}".format(abs(n)).replace(",", " ").rstrip("0").rstrip(".")
+    sym = {"USD": "$", "CNY": "¥", "KGS": ""}.get(cur, "")
+    body = (s + " с") if cur == "KGS" else sym + s
+    return ("−" if n < -0.004 else "") + body
+
+def fmt_date(d):
+    if not d: return ""
+    y, m, dd = d.split("-"); return "%s.%s.%s" % (dd, m, y)
+
 # ---------------------------------------------------------------- HTTP
 class H(BaseHTTPRequestHandler):
     server_version = "ChinaUchet/" + VERSION
@@ -300,7 +444,9 @@ class H(BaseHTTPRequestHandler):
     def _user(self):
         cookie = self.headers.get("Cookie") or ""
         m = re.search(r"kn_session=([^;]+)", cookie)
-        return check_token(m.group(1)) if m else None
+        u = check_token(m.group(1)) if m else None
+        if u or AUTH: return u
+        return owner_user()   # локальный режим: вход не нужен
 
     # -- маршрутизация
     def route(self, method):
@@ -317,9 +463,13 @@ class H(BaseHTTPRequestHandler):
             if path.startswith("/api/") and not user: return self._err(401, "Нужен вход")
             if path == "/api/logout" and method == "POST":
                 return self._send(200, {"ok": True}, headers={"Set-Cookie": "kn_session=; Max-Age=0; Path=/"})
-            if path == "/api/me" and method == "GET": return self._send(200, {**user, "version": VERSION})
+            if path == "/api/me" and method == "GET": return self._send(200, {**user, "version": VERSION, "auth": AUTH})
+            if path == "/api/settings":
+                if method == "GET": return self.settings_get()
+                if method == "PATCH": return self.settings_save(self._body())
 
-            m_id = re.match(r"^/api/(stores|partners|shipments|payments)/(\d+)$", path)
+            m_id = re.match(r"^/api/(stores|partners|shipments|payments|investments|payouts|investors)/(\d+)(/[a-z]+)?$", path)
+            sub = m_id.group(3) if m_id else None
             if path == "/api/stores":
                 if method == "GET": return self.stores_list(q)
                 if method == "POST": return self.store_save(self._body())
@@ -339,6 +489,7 @@ class H(BaseHTTPRequestHandler):
                 if method == "POST": return self.shipment_save(self._body())
             if m_id and m_id.group(1) == "shipments":
                 sid = int(m_id.group(2))
+                if sub == "/split" and method == "POST": return self.shipment_split(sid, self._body())
                 if method == "GET": return self.shipment_one(sid)
                 if method == "PATCH": return self.shipment_save(self._body(), sid)
                 if method == "DELETE": return self.shipment_delete(sid)
@@ -349,11 +500,34 @@ class H(BaseHTTPRequestHandler):
                 yid = int(m_id.group(2))
                 if method == "PATCH": return self.payment_save(self._body(), yid)
                 if method == "DELETE": return self.payment_delete(yid)
+            if path == "/api/investments":
+                if method == "GET": return self.investments_list(q)
+                if method == "POST": return self.investment_save(self._body())
+            if m_id and m_id.group(1) == "investments":
+                vid = int(m_id.group(2))
+                if method == "PATCH": return self.investment_save(self._body(), vid)
+                if method == "DELETE": return self.investment_delete(vid)
+            if path == "/api/payouts":
+                if method == "GET": return self.payouts_list(q)
+                if method == "POST": return self.payout_save(self._body())
+            if m_id and m_id.group(1) == "payouts":
+                oid = int(m_id.group(2))
+                if method == "PATCH": return self.payout_save(self._body(), oid)
+                if method == "DELETE": return self.payout_delete(oid)
+            if path == "/api/investors" and method == "GET": return self.investors_list()
+            if m_id and m_id.group(1) == "investors":
+                iid = int(m_id.group(2))
+                if sub == "/report" and method == "GET": return self.investor_report(iid)
+                if method == "GET": return self.investor_one(iid)
             if path == "/api/summary" and method == "GET": return self.summary(q)
             if path == "/api/export.csv" and method == "GET": return self.export_csv(q)
             if path == "/api/payments.csv" and method == "GET": return self.export_payments_csv(q)
             if path == "/api/backup" and method == "POST":
                 dst = backup_db(); return self._send(200, {"ok": True, "file": os.path.basename(dst or "")})
+            if path == "/api/backup.db" and method == "GET":
+                backup_db()
+                return self._send(200, open(DB, "rb").read(), "application/octet-stream",
+                                  {"Content-Disposition": "attachment; filename=china-uchet-%s.db" % today()})
             return self._err(404, "Нет такого адреса")
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -373,20 +547,40 @@ class H(BaseHTTPRequestHandler):
     def static(self, path):
         name = os.path.basename(path)
         types = {"css": "text/css; charset=utf-8", "js": "application/javascript; charset=utf-8",
-                 "svg": "image/svg+xml", "png": "image/png", "json": "application/json; charset=utf-8"}
+                 "svg": "image/svg+xml", "png": "image/png", "json": "application/json; charset=utf-8",
+                 "webmanifest": "application/manifest+json"}
         ext = name.rsplit(".", 1)[-1] if "." in name else ""
+        if name == "manifest.webmanifest":
+            data = json.dumps({"name": "Китай · учёт", "short_name": "Китай", "start_url": "/", "display": "standalone",
+                               "background_color": "#06070C", "theme_color": "#06070C",
+                               "icons": [{"src": "/static/icon.png", "sizes": "180x180", "type": "image/png"}]}, ensure_ascii=False)
+            return self._send(200, data.encode(), types["webmanifest"])
         fp = os.path.join(WEB, name)
         if ext not in types or not os.path.isfile(fp): return self._err(404, "Нет файла")
         self._send(200, open(fp, "rb").read(), types[ext])
 
-    # -- вход
+    # -- вход (только облачный режим)
     def api_login(self):
         b = self._body()
         u = check_password((b.get("login") or "").strip().lower(), b.get("password") or "")
         if not u: return self._err(403, "Неверный логин или пароль")
         tok = make_token(u["login"])
-        self._send(200, {"ok": True, "user": {"login": u["login"], "role": u["role"], "name": u["name"], "version": VERSION}},
+        self._send(200, {"ok": True, "user": {"login": u["login"], "role": u["role"], "name": u["name"], "version": VERSION, "auth": AUTH}},
                    headers={"Set-Cookie": "kn_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax" % (tok, 30*86400)})
+
+    # -- настройки
+    def settings_get(self):
+        c = db(); s = get_settings(c); c.close(); self._send(200, s)
+
+    def settings_save(self, b):
+        c = db()
+        if "currency" in b and b["currency"] in ("USD", "CNY", "KGS"):
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('currency',?)", (b["currency"],))
+        if "rate" in b:
+            try: v = str(float(b["rate"])) if b["rate"] not in (None, "") else ""
+            except Exception: v = ""
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('rate',?)", (v,))
+        c.commit(); s = get_settings(c); c.close(); self._send(200, s)
 
     # -- магазины
     def stores_list(self, q):
@@ -429,6 +623,9 @@ class H(BaseHTTPRequestHandler):
         rows = [dict(r) for r in c.execute("SELECT * FROM partners ORDER BY active DESC, name")]
         for r in rows:
             r.update(supplier_finance(c, r["id"]))
+            if r["is_investor"]:
+                ic = investor_calc(c, r["id"], with_lists=False)
+                r.update(inv_invested=ic["invested"], inv_due=ic["due"], inv_accrued=ic["accrued"])
         c.close(); self._send(200, rows)
 
     def partner_one(self, pid):
@@ -462,12 +659,14 @@ class H(BaseHTTPRequestHandler):
 
     def partner_delete(self, pid):
         c = db()
-        used = c.execute("SELECT 1 FROM shipments WHERE supplier_id=? AND deleted=0 LIMIT 1", (pid,)).fetchone() \
-            or c.execute("SELECT 1 FROM payments WHERE supplier_id=? LIMIT 1", (pid,)).fetchone()
+        used = (c.execute("SELECT 1 FROM shipments WHERE supplier_id=? AND deleted=0 LIMIT 1", (pid,)).fetchone()
+                or c.execute("SELECT 1 FROM payments WHERE supplier_id=? LIMIT 1", (pid,)).fetchone()
+                or c.execute("SELECT 1 FROM investments WHERE investor_id=? LIMIT 1", (pid,)).fetchone()
+                or c.execute("SELECT 1 FROM investor_payouts WHERE investor_id=? LIMIT 1", (pid,)).fetchone())
         if used:
             c.execute("UPDATE partners SET active=0 WHERE id=?", (pid,)); c.commit(); c.close()
             return self._send(200, {"ok": True, "hidden": True,
-                                    "msg": "У контрагента есть партии или платежи — скрыт, история сохранена"})
+                                    "msg": "У контрагента есть партии, платежи или вложения — скрыт, история сохранена"})
         c.execute("DELETE FROM partners WHERE id=?", (pid,)); c.commit(); c.close()
         self._send(200, {"ok": True})
 
@@ -489,16 +688,24 @@ class H(BaseHTTPRequestHandler):
             args += [like, like, like, like]
         return " AND ".join(w), args
 
+    SORTS = {"date_desc": (lambda s: (s["date"], s["id"]), True), "date_asc": (lambda s: (s["date"], s["id"]), False),
+             "amount_desc": (lambda s: s["amount"], True), "balance_desc": (lambda s: s["balance"], True),
+             "supplier": (lambda s: (s["supplier_name"].lower(), s["date"]), False)}
+
     def shipments_list(self, q):
         c = db()
         where, args = self._ship_where(q)
         rows = c.execute("SELECT p.* FROM shipments p WHERE %s ORDER BY p.date DESC, p.id DESC" % where, args).fetchall()
         out = [pack_shipment(c, r) for r in rows]
+        key, rev = self.SORTS.get((q.get("sort") or ["date_desc"])[0], self.SORTS["date_desc"])
+        out.sort(key=key, reverse=rev)
         live = [s for s in out if s["status"] != "cancelled"]
         tot = {"count": len(out),
                "items": sum(len(s["items"]) for s in out),
                "amount": r2(sum(s["amount"] for s in live)),
-               "paid": r2(sum(s["paid"] for s in live))}
+               "paid": r2(sum(s["paid"] for s in live)),
+               "profit": r2(sum(s["profit"] or 0 for s in live if s["profit"] is not None)),
+               "closed": len([s for s in live if s["profit"] is not None])}
         tot["balance"] = r2(tot["amount"] - tot["paid"])
         c.close(); self._send(200, {"rows": out, "totals": tot})
 
@@ -514,14 +721,20 @@ class H(BaseHTTPRequestHandler):
         if sid:
             old = c.execute("SELECT * FROM shipments WHERE id=? AND deleted=0", (sid,)).fetchone()
             if not old: c.close(); return self._err(404, "Партия не найдена")
-        # частичное обновление (смена статуса и т.п.) — без items
+        # частичное обновление (смена статуса, прибыль и т.п.) — без items
         partial = sid and "items" not in b
         if not partial:
             errs = validate_shipment({**(dict(old) if old else {}), **b}, c)
             if errs: c.close(); return self._err(400, "; ".join(errs))
+        if "profit" in b:
+            if b["profit"] in (None, ""): b["profit"] = None; b["closed_at"] = None
+            else:
+                try: b["profit"] = float(b["profit"])
+                except Exception: c.close(); return self._err(400, "Прибыль должна быть числом")
+                if not b.get("closed_at") and not (old and old["closed_at"]): b["closed_at"] = today()
         b = apply_status_dates(b, old)
         fields = ["date","supplier_id","currency","rate","prepaid","status","sent_date",
-                  "arrived_date","eta_date","track","default_store_id","note"]
+                  "arrived_date","eta_date","track","default_store_id","note","profit","closed_at"]
         if sid:
             sets, args = [], []
             for f in fields:
@@ -530,12 +743,12 @@ class H(BaseHTTPRequestHandler):
             c.execute("UPDATE shipments SET %s WHERE id=?" % ",".join(sets), args)
         else:
             sid = c.execute("""INSERT INTO shipments(date,supplier_id,currency,rate,prepaid,status,sent_date,
-                               arrived_date,eta_date,track,default_store_id,note,created_at,updated_at)
-                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               arrived_date,eta_date,track,default_store_id,note,profit,closed_at,created_at,updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (b.get("date"), b.get("supplier_id"), b.get("currency") or "USD", b.get("rate"),
                              b.get("prepaid") or 0, b.get("status") or "new", b.get("sent_date"),
                              b.get("arrived_date"), b.get("eta_date"), b.get("track") or "",
-                             b.get("default_store_id"), b.get("note") or "", now(), now())).lastrowid
+                             b.get("default_store_id"), b.get("note") or "", b.get("profit"), b.get("closed_at"), now(), now())).lastrowid
         if "items" in b:
             c.execute("DELETE FROM shipment_items WHERE shipment_id=?", (sid,))
             for i in b["items"]:
@@ -554,6 +767,56 @@ class H(BaseHTTPRequestHandler):
         c = db()
         c.execute("UPDATE shipments SET deleted=1, updated_at=? WHERE id=?", (now(), sid))
         c.commit(); c.close(); self._send(200, {"ok": True})
+
+    def shipment_split(self, sid, b):
+        """Разделить партию: отмеченные товары уходят в новую партию с тем же поставщиком и датой."""
+        c = db()
+        old = c.execute("SELECT * FROM shipments WHERE id=? AND deleted=0", (sid,)).fetchone()
+        if not old: c.close(); return self._err(404, "Партия не найдена")
+        try: ids = {int(x) for x in (b.get("item_ids") or [])}
+        except Exception: ids = set()
+        items = [dict(r) for r in c.execute("SELECT * FROM shipment_items WHERE shipment_id=?", (sid,))]
+        move = [i for i in items if i["id"] in ids]; stay = [i for i in items if i["id"] not in ids]
+        if not move: c.close(); return self._err(400, "Не отмечен ни один товар для переноса")
+        if not stay: c.close(); return self._err(400, "Нельзя перенести все товары — тогда это та же партия")
+        status = b.get("status") or old["status"]
+        if status not in VALID_STATUS: c.close(); return self._err(400, "Неверный статус новой партии")
+        total = sum(i["amount"] or 0 for i in items); msum = sum(i["amount"] or 0 for i in move)
+        pays = payments_of_shipment(c, sid)
+        prepaid_new, prepaid_old = 0.0, float(old["prepaid"] or 0)
+        if not pays:
+            if b.get("prepaid_new") not in (None, ""):
+                try: prepaid_new = float(b["prepaid_new"])
+                except Exception: c.close(); return self._err(400, "Аванс новой партии должен быть числом")
+            else:
+                prepaid_new = round(prepaid_old * msum / total, 2) if total else 0
+            prepaid_new = max(0.0, min(prepaid_new, prepaid_old))
+            prepaid_old = r2(prepaid_old - prepaid_new)
+        nb = {"status": status, "sent_date": old["sent_date"] if status in ("shipping", "arrived") else None,
+              "arrived_date": old["arrived_date"] if status == "arrived" else None}
+        nb = apply_status_dates(nb)
+        new_id = c.execute("""INSERT INTO shipments(date,supplier_id,currency,rate,prepaid,status,sent_date,arrived_date,eta_date,
+                              track,default_store_id,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (old["date"], old["supplier_id"], old["currency"], old["rate"], r2(prepaid_new), status,
+                            nb.get("sent_date"), nb.get("arrived_date"), old["eta_date"] if status == "shipping" else None,
+                            old["track"] or "", old["default_store_id"],
+                            ((old["note"] or "") + " · " if old["note"] else "") + "выделена из партии от %s" % fmt_date(old["date"]),
+                            now(), now())).lastrowid
+        c.execute("UPDATE shipment_items SET shipment_id=? WHERE id IN (%s)" % ",".join("?" * len(move)),
+                  [new_id] + [i["id"] for i in move])
+        if not pays:
+            c.execute("UPDATE shipments SET prepaid=?, updated_at=? WHERE id=?", (prepaid_old, now(), sid))
+        else:
+            try: pids = [int(x) for x in (b.get("payment_ids") or [])]
+            except Exception: pids = []
+            if pids:
+                c.execute("UPDATE payments SET shipment_id=? WHERE shipment_id=? AND id IN (%s)" % ",".join("?" * len(pids)),
+                          [new_id, sid] + pids)
+        c.execute("UPDATE shipments SET updated_at=? WHERE id=?", (now(), sid))
+        c.commit()
+        out = {"ok": True, "old": pack_shipment(c, c.execute("SELECT * FROM shipments WHERE id=?", (sid,)).fetchone()),
+               "new": pack_shipment(c, c.execute("SELECT * FROM shipments WHERE id=?", (new_id,)).fetchone())}
+        c.close(); self._send(200, out)
 
     # -- платежи (этап 2)
     def _pay_where(self, q):
@@ -638,31 +901,205 @@ class H(BaseHTTPRequestHandler):
         c.execute("DELETE FROM payments WHERE id=?", (yid,)); c.commit(); c.close()
         self._send(200, {"ok": True})
 
+    # -- инвесторы (этап 4)
+    def investors_list(self):
+        c = db()
+        rows = [dict(r) for r in c.execute("""SELECT * FROM partners WHERE is_investor=1
+                    OR id IN (SELECT investor_id FROM investments) OR id IN (SELECT investor_id FROM investor_payouts)
+                    ORDER BY active DESC, name""")]
+        pt = pool_total(c)
+        for r in rows:
+            r.update(investor_calc(c, r["id"], with_lists=False))
+            terms = c.execute("""SELECT terms, terms_value, COUNT(*) n FROM investments WHERE investor_id=?
+                                 GROUP BY terms, terms_value ORDER BY n DESC LIMIT 1""", (r["id"],)).fetchone()
+            r["terms"] = terms["terms"] if terms else None
+            r["terms_value"] = terms["terms_value"] if terms else None
+            r["pool_share"] = r2(c.execute("SELECT COALESCE(SUM(amount),0) s FROM investments WHERE investor_id=? AND shipment_id IS NULL", (r["id"],)).fetchone()["s"] / pt * 100) if pt else 0
+        tot = {"invested": r2(sum(r["invested"] for r in rows)), "accrued": r2(sum(r["accrued"] for r in rows)),
+               "paid_profit": r2(sum(r["paid_profit"] for r in rows)), "paid_principal": r2(sum(r["paid_principal"] for r in rows)),
+               "due": r2(sum(r["due"] for r in rows)), "principal_out": r2(sum(r["principal_out"] for r in rows)),
+               "pool_total": r2(pt),
+               "closed_profit": r2(c.execute("SELECT COALESCE(SUM(profit),0) s FROM shipments WHERE deleted=0 AND profit IS NOT NULL").fetchone()["s"]),
+               "closed_count": c.execute("SELECT COUNT(*) n FROM shipments WHERE deleted=0 AND profit IS NOT NULL").fetchone()["n"]}
+        c.close(); self._send(200, {"rows": rows, "totals": tot})
+
+    def investor_one(self, iid):
+        c = db()
+        p = c.execute("SELECT * FROM partners WHERE id=?", (iid,)).fetchone()
+        if not p: c.close(); return self._err(404, "Инвестор не найден")
+        out = {**dict(p), **investor_calc(c, iid), "pool_total": r2(pool_total(c))}
+        c.close(); self._send(200, out)
+
+    def investments_list(self, q):
+        c = db()
+        w, args = ["1=1"], []
+        if q.get("investor"): w.append("v.investor_id=?"); args.append(q["investor"][0])
+        if q.get("shipment"): w.append("v.shipment_id=?"); args.append(q["shipment"][0])
+        rows = [dict(r) for r in c.execute(INV_SQL + " WHERE %s ORDER BY v.date DESC, v.id DESC" % " AND ".join(w), args)]
+        pt = pool_total(c)
+        for v in rows: v["accrued"], v["accrual_note"] = accrual_of(c, v, pt)
+        c.close(); self._send(200, {"rows": rows})
+
+    def investment_save(self, b, vid=None):
+        c = db(); errs = []
+        if not b.get("date"): errs.append("Не указана дата")
+        inv = b.get("investor_id")
+        if not inv: errs.append("Не выбран инвестор")
+        elif not c.execute("SELECT 1 FROM partners WHERE id=?", (inv,)).fetchone(): errs.append("Такого контрагента нет")
+        try: amount = float(b.get("amount") or 0)
+        except Exception: amount = 0
+        if amount <= 0: errs.append("Сумма должна быть больше нуля")
+        terms = b.get("terms") or "share"
+        if terms not in VALID_TERMS: errs.append("Неверное условие")
+        try: tv = float(b.get("terms_value") or 0)
+        except Exception: tv = -1
+        if tv < 0 or tv > 100: errs.append("Процент должен быть от 0 до 100")
+        ship = b.get("shipment_id") or None
+        if ship and not c.execute("SELECT 1 FROM shipments WHERE id=? AND deleted=0", (ship,)).fetchone(): errs.append("Партия не найдена")
+        if errs: c.close(); return self._err(400, "; ".join(errs))
+        vals = (b["date"], int(inv), int(ship) if ship else None, round(amount, 2), b.get("currency") or "USD", terms, tv,
+                (b.get("note") or "").strip(), b.get("end_date") or None)
+        if vid:
+            if not c.execute("SELECT 1 FROM investments WHERE id=?", (vid,)).fetchone(): c.close(); return self._err(404, "Вложение не найдено")
+            c.execute("""UPDATE investments SET date=?,investor_id=?,shipment_id=?,amount=?,currency=?,terms=?,terms_value=?,note=?,end_date=?
+                         WHERE id=?""", vals + (vid,))
+        else:
+            vid = c.execute("""INSERT INTO investments(date,investor_id,shipment_id,amount,currency,terms,terms_value,note,end_date,created_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)""", vals + (now(),)).lastrowid
+            c.execute("UPDATE partners SET is_investor=1 WHERE id=?", (int(inv),))
+        c.commit()
+        row = dict(c.execute(INV_SQL + " WHERE v.id=?", (vid,)).fetchone())
+        row["accrued"], row["accrual_note"] = accrual_of(c, row)
+        c.close(); self._send(200, row)
+
+    def investment_delete(self, vid):
+        c = db()
+        if not c.execute("SELECT 1 FROM investments WHERE id=?", (vid,)).fetchone(): c.close(); return self._err(404, "Вложение не найдено")
+        c.execute("DELETE FROM investments WHERE id=?", (vid,)); c.commit(); c.close(); self._send(200, {"ok": True})
+
+    def payouts_list(self, q):
+        c = db()
+        w, args = ["1=1"], []
+        if q.get("investor"): w.append("o.investor_id=?"); args.append(q["investor"][0])
+        rows = [dict(r) for r in c.execute(PO_SQL + " WHERE %s ORDER BY o.date DESC, o.id DESC" % " AND ".join(w), args)]
+        c.close(); self._send(200, {"rows": rows})
+
+    def payout_save(self, b, oid=None):
+        c = db(); errs = []
+        if not b.get("date"): errs.append("Не указана дата")
+        inv = b.get("investor_id")
+        if not inv: errs.append("Не выбран инвестор")
+        elif not c.execute("SELECT 1 FROM partners WHERE id=?", (inv,)).fetchone(): errs.append("Такого контрагента нет")
+        try: amount = float(b.get("amount") or 0)
+        except Exception: amount = 0
+        if amount <= 0: errs.append("Сумма должна быть больше нуля")
+        kind = b.get("kind") or "profit"
+        if kind not in VALID_PAYOUT: errs.append("Неверный тип выплаты")
+        if errs: c.close(); return self._err(400, "; ".join(errs))
+        vals = (b["date"], int(inv), round(amount, 2), b.get("currency") or "USD", kind, (b.get("note") or "").strip())
+        if oid:
+            if not c.execute("SELECT 1 FROM investor_payouts WHERE id=?", (oid,)).fetchone(): c.close(); return self._err(404, "Выплата не найдена")
+            c.execute("UPDATE investor_payouts SET date=?,investor_id=?,amount=?,currency=?,kind=?,note=? WHERE id=?", vals + (oid,))
+        else:
+            oid = c.execute("INSERT INTO investor_payouts(date,investor_id,amount,currency,kind,note,created_at) VALUES(?,?,?,?,?,?,?)",
+                            vals + (now(),)).lastrowid
+        c.commit()
+        row = dict(c.execute(PO_SQL + " WHERE o.id=?", (oid,)).fetchone())
+        c.close(); self._send(200, row)
+
+    def payout_delete(self, oid):
+        c = db()
+        if not c.execute("SELECT 1 FROM investor_payouts WHERE id=?", (oid,)).fetchone(): c.close(); return self._err(404, "Выплата не найдена")
+        c.execute("DELETE FROM investor_payouts WHERE id=?", (oid,)); c.commit(); c.close(); self._send(200, {"ok": True})
+
+    def investor_report(self, iid):
+        """Отчёт инвестору одной страницей — печать / сохранить в PDF из браузера."""
+        c = db()
+        p = c.execute("SELECT * FROM partners WHERE id=?", (iid,)).fetchone()
+        if not p: c.close(); return self._err(404, "Инвестор не найден")
+        d = investor_calc(c, iid); c.close()
+        cur = p["currency"] or "USD"
+        terms_ru = lambda v: ("%g%% от прибыли" % float(v["terms_value"] or 0)) if v["terms"] == "share" else ("%g%% в месяц" % float(v["terms_value"] or 0))
+        target = lambda v: ("партия от %s · %s" % (fmt_date(v["ship_date"]), v["ship_supplier"] or "")) if v["shipment_id"] else "общий пул"
+        inv_rows = "".join("<tr><td>%s</td><td>%s</td><td class=num>%s</td><td>%s</td><td class=num>%s</td><td class=note>%s</td></tr>" % (
+            fmt_date(v["date"]), esc(target(v)), fmt_money(v["amount"], v["currency"]), terms_ru(v), fmt_money(v["accrued"], v["currency"]), esc(v["accrual_note"]))
+            for v in d["investments"]) or "<tr><td colspan=6 class=note>Вложений нет</td></tr>"
+        po_rows = "".join("<tr><td>%s</td><td>%s</td><td class=num>%s</td><td class=note>%s</td></tr>" % (
+            fmt_date(o["date"]), "Доля прибыли" if o["kind"] == "profit" else "Возврат вложения", fmt_money(o["amount"], o["currency"]), esc(o["note"]))
+            for o in d["payouts"]) or "<tr><td colspan=4 class=note>Выплат ещё не было</td></tr>"
+        html = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Отчёт инвестору — %(name)s</title>
+<style>
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif;color:#14171F;background:#fff;max-width:860px;margin:0 auto;padding:36px 28px}
+h1{font-size:24px;letter-spacing:-.5px;margin:0 0 4px}h2{font-size:15px;margin:28px 0 8px;color:#333}
+.sub{color:#6B7280;margin-bottom:22px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0 6px}
+.tile{border:1px solid #E3E6EC;border-radius:12px;padding:12px 14px}.tile span{display:block;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.4px}
+.tile b{display:block;font-size:20px;letter-spacing:-.5px;margin-top:4px}.tile.due b{color:#B45309}
+table{width:100%%;border-collapse:collapse;margin-top:6px}th,td{padding:8px 10px;border-bottom:1px solid #E9ECF1;text-align:left;vertical-align:top}
+th{font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.note{color:#6B7280;font-size:12.5px}
+.foot{margin-top:28px;color:#6B7280;font-size:12px;line-height:1.5}
+.bar{display:flex;gap:10px;margin-bottom:18px}.bar button{font:inherit;padding:8px 14px;border-radius:9px;border:1px solid #D5D9E0;background:#F6F7F9;cursor:pointer}
+@media print{.bar{display:none}body{padding:0}}
+@media(max-width:640px){.tiles{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<div class="bar"><button onclick="print()">Печать / сохранить в PDF</button><button onclick="history.back()">← Назад</button></div>
+<h1>Отчёт инвестору: %(name)s</h1>
+<div class="sub">по состоянию на %(today)s%(contact)s</div>
+<div class="tiles">
+<div class="tile"><span>Вложено</span><b>%(invested)s</b></div>
+<div class="tile"><span>Начислено</span><b>%(accrued)s</b></div>
+<div class="tile"><span>Выплачено долей</span><b>%(paid_profit)s</b></div>
+<div class="tile due"><span>Остаток к выплате</span><b>%(due)s</b></div>
+</div>
+<div class="note">Тело вложения: возвращено %(paid_principal)s, остаётся у нас %(principal_out)s.</div>
+<h2>Вложения</h2>
+<table><tr><th>Дата</th><th>Куда</th><th class=num>Сумма</th><th>Условие</th><th class=num>Начислено</th><th>Как посчитано</th></tr>%(inv_rows)s</table>
+<h2>Выплаты</h2>
+<table><tr><th>Дата</th><th>Тип</th><th class=num>Сумма</th><th>Комментарий</th></tr>%(po_rows)s</table>
+<div class="foot">Доля от прибыли начисляется после закрытия партии (прибыль вводится владельцем по факту продаж). Вложение в общий пул получает долю от прибыли всех закрытых партий без адресных вложений, пропорционально своей части пула. Фиксированный процент начисляется за каждый полный месяц с даты вложения.<br>Сформировано программой «Китай · учёт» %(ver)s.</div>
+</body></html>""" % {
+            "name": esc(p["name"]), "today": fmt_date(today()),
+            "contact": (" · " + esc(p["contact"])) if p["contact"] else "",
+            "invested": fmt_money(d["invested"], cur), "accrued": fmt_money(d["accrued"], cur),
+            "paid_profit": fmt_money(d["paid_profit"], cur), "due": fmt_money(d["due"], cur),
+            "paid_principal": fmt_money(d["paid_principal"], cur), "principal_out": fmt_money(d["principal_out"], cur),
+            "inv_rows": inv_rows, "po_rows": po_rows, "ver": VERSION}
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
     # -- сводка
     def summary(self, q):
         c = db()
         rows = [pack_shipment(c, r) for r in c.execute("SELECT p.* FROM shipments p WHERE p.deleted=0")]
         live = [s for s in rows if s["status"] != "cancelled"]
         transit = [s for s in rows if s["status"] == "shipping"]
+        frm, to = (q.get("from") or [""])[0], (q.get("to") or [""])[0]
+        inp = lambda d: (not frm or (d or "") >= frm) and (not to or (d or "") <= to)
+        live_p = [s for s in live if inp(s["date"])]; rows_p = [s for s in rows if inp(s["date"])]
         sups = c.execute("SELECT id, name FROM partners WHERE is_supplier=1 OR id IN (SELECT DISTINCT supplier_id FROM shipments)").fetchall()
         by_sup = {s["id"]: s["name"] for s in sups}
         fin = {}
         for pid in by_sup:
             fin[pid] = supplier_finance(c, pid, [s for s in rows if s["supplier_id"] == pid])
-        ordered = r2(sum(s["amount"] for s in live))
-        paid = r2(sum(f["paid"] for f in fin.values()))
+        pays = [dict(r) for r in c.execute("SELECT * FROM payments")]
+        ordered = r2(sum(s["amount"] for s in live_p))
+        paid_p = r2(sum(signed(y) for y in pays if inp(y["date"]))
+                    + sum(s["paid"] for s in live_p if s["pay_mode"] == "manual"))
+        paid_all = r2(sum(f["paid"] for f in fin.values()))
         debts = sorted(((by_sup[p], f["debt"]) for p, f in fin.items() if f["debt"] > 0.004), key=lambda x: -x[1])
         overpaid = sorted(((by_sup[p], -f["debt"]) for p, f in fin.items() if f["debt"] < -0.004), key=lambda x: -x[1])
         tiles = {
-            "ordered": ordered, "ordered_items": sum(len(s["items"]) for s in live), "ordered_count": len(live),
-            "paid": paid, "balance": r2(ordered - paid),
+            "ordered": ordered, "ordered_items": sum(len(s["items"]) for s in live_p), "ordered_count": len(live_p),
+            "paid": paid_p if (frm or to) else paid_all, "balance": r2(ordered - paid_p),
             "debt_suppliers": len(debts), "debt_total": r2(sum(v for _, v in debts)),
             "transit": r2(sum(s["amount"] for s in transit)), "transit_count": len(transit),
             "transit_max_days": max([s["days_transit"] or 0 for s in transit], default=0),
+            "profit": r2(sum(s["profit"] or 0 for s in live_p if s["profit"] is not None)),
+            "closed_count": len([s for s in live_p if s["profit"] is not None]),
         }
         # серии по месяцам (7 последних) — для мини-графиков и столбиков
         keys = month_keys(7)
-        pays = [dict(r) for r in c.execute("SELECT * FROM payments")]
         sup_ids = {s["supplier_id"] for s in live} | {y["supplier_id"] for y in pays}
         series = {"ordered": [], "paid": [], "balance": [], "sent": []}
         months = []
@@ -672,7 +1109,6 @@ class H(BaseHTTPRequestHandler):
                    + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] == ym))
             snt = r2(sum(s["amount"] for s in live if (s["sent_date"] or "")[:7] == ym))
             # остаток к оплате — накопительный долг на конец месяца, по каждому поставщику отдельно
-            # (переплата одному не гасит долг другому — так же считается плитка debt_total)
             bal = 0.0
             for pid in sup_ids:
                 co = sum(s["amount"] for s in live if s["supplier_id"] == pid and s["date"][:7] <= ym)
@@ -682,12 +1118,14 @@ class H(BaseHTTPRequestHandler):
             series["ordered"].append(o); series["paid"].append(p)
             series["balance"].append(r2(bal)); series["sent"].append(snt)
             months.append({"ym": ym, "total": o, "paid": p})
-        by_status = {st: {"count": len([s for s in rows if s["status"] == st]),
-                          "amount": r2(sum(s["amount"] for s in rows if s["status"] == st))} for st in VALID_STATUS}
-        top_sup = sorted(((by_sup[p], f["total"], f["debt"]) for p, f in fin.items() if f["total"] > 0),
+        by_status = {st: {"count": len([s for s in rows_p if s["status"] == st]),
+                          "amount": r2(sum(s["amount"] for s in rows_p if s["status"] == st))} for st in VALID_STATUS}
+        sup_p = {}
+        for s in live_p: sup_p[s["supplier_id"]] = r2(sup_p.get(s["supplier_id"], 0) + s["amount"])
+        top_sup = sorted(((by_sup.get(p, "?"), v, fin[p]["debt"] if p in fin else 0) for p, v in sup_p.items() if v > 0),
                          key=lambda x: -x[1])[:6]
         by_store = {}
-        for s in live:
+        for s in live_p:
             for i in s["items"]:
                 k = "№" + i["store_number"] + (" · " + i["store_name"] if i["store_name"] else "")
                 by_store[k] = r2(by_store.get(k, 0) + (i["amount"] or 0))
@@ -696,11 +1134,22 @@ class H(BaseHTTPRequestHandler):
         this_month = today()[:7]
         month_paid = r2(sum(signed(y) for y in pays if (y["date"] or "")[:7] == this_month))
         arriving = sorted(transit, key=lambda s: s["eta_date"] or s["sent_date"] or "9999")
+        # инвесторы одной строкой + топ для правой колонки
+        inv_rows = [dict(r) for r in c.execute("SELECT id, name FROM partners WHERE is_investor=1 OR id IN (SELECT investor_id FROM investments)")]
+        inv_top = []
+        for r in inv_rows:
+            ic = investor_calc(c, r["id"], with_lists=False)
+            inv_top.append({"id": r["id"], "name": r["name"], **ic})
+        inv_top.sort(key=lambda x: -x["due"])
+        investors = {"count": len(inv_top), "invested": r2(sum(x["invested"] for x in inv_top)),
+                     "accrued": r2(sum(x["accrued"] for x in inv_top)), "due": r2(sum(x["due"] for x in inv_top)),
+                     "paid_profit": r2(sum(x["paid_profit"] for x in inv_top)), "top": inv_top[:4]}
         c.close()
         self._send(200, {"tiles": tiles, "series": series, "months": months, "by_status": by_status,
                          "top_suppliers": top_sup, "by_store": by_store, "recent_payments": recent,
                          "month_paid": month_paid, "payments_count": len(pays),
-                         "debts": debts, "overpaid": overpaid,
+                         "debts": debts, "overpaid": overpaid, "investors": investors,
+                         "period": {"from": frm, "to": to},
                          "arriving": [{"id": s["id"], "supplier": s["supplier_name"], "eta": s["eta_date"],
                                        "days": s["days_transit"], "amount": s["amount"], "sent": s["sent_date"]}
                                       for s in arriving]})
@@ -716,13 +1165,13 @@ class H(BaseHTTPRequestHandler):
         w = csv.writer(buf, delimiter=";")
         st_ru = {"new": "Не отправлен", "shipping": "В пути", "arrived": "Прибыл", "cancelled": "Отменён"}
         w.writerow(["Дата","Поставщик","Статус","Трек","Магазин","Товар","Кол-во","Ед.","Цена","Сумма",
-                    "Валюта","Оплачено по партии","Остаток по партии","Сумма партии","Комментарий"])
+                    "Валюта","Оплачено по партии","Остаток по партии","Сумма партии","Прибыль партии","Комментарий"])
         for s in rows:
             for i in s["items"]:
                 w.writerow([s["date"], s["supplier_name"], st_ru.get(s["status"], s["status"]), s["track"] or "",
                             "№" + i["store_number"], i["product"], i["qty"] or "", i["unit"] or "",
                             i["unit_price"] or "", i["amount"], s["currency"], s["paid"], s["balance"],
-                            s["amount"], (i["note"] or s["note"] or "")])
+                            s["amount"], s["profit"] if s["profit"] is not None else "", (i["note"] or s["note"] or "")])
         data = "﻿" + buf.getvalue()
         self._send(200, data.encode("utf-8"), "text/csv; charset=utf-8",
                    {"Content-Disposition": "attachment; filename=china-uchet.csv"})
@@ -749,8 +1198,12 @@ def main():
     SECRET = get_secret()
     b = backup_db()
     if b: print("Резервная копия:", os.path.basename(b))
+    icon = os.path.join(WEB, "icon.png")
+    if not os.path.exists(icon):
+        try: make_icon(icon)
+        except Exception as e: print("Иконка не создана:", e)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
-    print("Китай · учёт %s работает: http://localhost:%d" % (VERSION, PORT))
+    print("Китай · учёт %s работает: http://localhost:%d%s" % (VERSION, PORT, "" if AUTH else " (вход не нужен)"))
     srv.serve_forever()
 
 if __name__ == "__main__":

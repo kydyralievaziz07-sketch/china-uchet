@@ -1,5 +1,5 @@
 "use strict";
-/* Китай · учёт — логика интерфейса, v2 (этапы 1–2) */
+/* Китай · учёт — логика интерфейса, v4 (этапы 1–4) */
 
 /* ═══════════════════ утилиты ═══════════════════ */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -7,21 +7,35 @@ const CUR={USD:"$",CNY:"¥",KGS:"с"};
 const ST_RU={new:"Не отправлен",shipping:"В пути",arrived:"Прибыл",cancelled:"Отменён"};
 const KIND_RU={prepay:"Аванс",final:"Доплата",refund:"Возврат"};
 const KINDS=["prepay","final","refund"];
+const TERMS=["share","fixed"],TERMS_RU={share:"Доля от прибыли",fixed:"Процент в месяц"};
+const PO_KINDS=["profit","principal"],PO_RU={profit:"Доля прибыли",principal:"Возврат вложения"};
 const METHODS=["Наличные","Перевод на карту","WeChat","Alipay","Через посредника","Другое"];
 const MON=["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
 const MONTH=["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+const PERIODS=[["all","Всё время"],["month","Этот месяц"],["prev","Прошлый месяц"],["quarter","Этот квартал"],["year","Этот год"],["custom","Свой период"]];
+const SORTS=[["date_desc","Сначала новые"],["date_asc","Сначала старые"],["amount_desc","По сумме"],["balance_desc","По остатку"],["supplier","По поставщику"]];
 const reduced=()=>matchMedia("(prefers-reduced-motion: reduce)").matches;
 const isMobile=()=>matchMedia("(max-width: 820px)").matches;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let UID=0;
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-function fmtN(v){return (Math.round((+v||0)*100)/100).toLocaleString("ru-RU",{maximumFractionDigits:2}).replace(/,/g,".").replace(/ /g," ")}
-function money(v,cur){cur=cur||"USD";const n=+v||0;const s=fmtN(Math.abs(n));const b=cur==="KGS"?s+" с":(CUR[cur]||"")+s;return (n<-0.004?"−":"")+b}
+function fmtN(v){return (Math.round((+v||0)*100)/100).toLocaleString("ru-RU",{maximumFractionDigits:2}).replace(/,/g,".").replace(/ /g," ")}
+function money(v,cur){cur=cur||"USD";const n=+v||0;const s=fmtN(Math.abs(n));const b=cur==="KGS"?s+" с":(CUR[cur]||"")+s;return (n<-0.004?"−":"")+b}
 function dRu(d){if(!d)return"";const[y,m,dd]=d.split("-");return dd+"."+m+"."+y}
 function dShort(d){if(!d)return"";const[y,m,dd]=d.split("-");return +dd+" "+MON[+m-1]}
 function ymRu(ym){const[y,m]=ym.split("-");return MONTH[+m-1]+" "+y}
-function todayISO(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
+function iso(x){return x.getFullYear()+"-"+String(x.getMonth()+1).padStart(2,"0")+"-"+String(x.getDate()).padStart(2,"0")}
+function todayISO(){return iso(new Date())}
 function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c}
+function periodRange(p,from,to){const d=new Date(),y=d.getFullYear(),m=d.getMonth();
+  if(p==="month")return[iso(new Date(y,m,1)),iso(new Date(y,m+1,0))];
+  if(p==="prev")return[iso(new Date(y,m-1,1)),iso(new Date(y,m,0))];
+  if(p==="quarter"){const q=Math.floor(m/3)*3;return[iso(new Date(y,q,1)),iso(new Date(y,q+3,0))]}
+  if(p==="year")return[iso(new Date(y,0,1)),iso(new Date(y,11,31))];
+  if(p==="custom")return[from||"",to||""];
+  return["",""]}
+function periodLabel(p,from,to){if(p==="custom")return(from?dRu(from):"…")+" — "+(to?dRu(to):"…");return(PERIODS.find(x=>x[0]===p)||PERIODS[0])[1].toLowerCase()}
+const termsRu=v=>v.terms==="fixed"?`${+v.terms_value||0}% в месяц`:`${+v.terms_value||0}% от прибыли`;
 async function api(path,opts={}){
   const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts,body:opts.body?JSON.stringify(opts.body):undefined});
   if(r.status===401){showLogin();throw new Error("Нужен вход")}
@@ -39,13 +53,18 @@ const I={
   plus:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   search:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   down:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>',
+  more:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
+  split:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.5 15.5M8.5 8.5L20 20"/></svg>',
+  flag:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4"/></svg>',
+  doc:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h6"/></svg>',
+  coins:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
 };
 const ILL='<svg class="ill" viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 62c14-22 30-22 44-10s22 8 24-6" stroke-dasharray="4 5" opacity=".45"/><path d="M30 44l18-8 18 8-18 8z" stroke="#6C8CFF"/><path d="M30 44v14l18 8 18-8V44" stroke="#6C8CFF"/><path d="M48 52v14" stroke="#6C8CFF"/><circle cx="14" cy="62" r="3" fill="#FFB65C" stroke="none"/><circle cx="82" cy="46" r="3" fill="#57E39B" stroke="none"/></svg>';
 
-/* ═══════════════════ тосты, окна ═══════════════════ */
+/* ═══════════════════ тосты, окна, меню ═══════════════════ */
 function toast(msg,cls="info"){
   const t=document.createElement("div");t.className="toast "+cls;
-  const life=cls==="err"?4200:2600;t.style.setProperty("--life",life+"ms");
+  const life=cls==="err"?4200:2800;t.style.setProperty("--life",life+"ms");
   t.innerHTML=`<span class="ic">${cls==="ok"?"✓":cls==="err"?"!":"i"}</span><span>${esc(msg)}</span>`;
   $("#toasts").appendChild(t);
   setTimeout(()=>{t.classList.add("out");t.addEventListener("animationend",()=>t.remove(),{once:true});setTimeout(()=>t.remove(),500)},life);
@@ -75,6 +94,17 @@ async function withBusy(btn,fn){
   catch(e){toast(e.message,"err");return false}
   finally{btn.disabled=false;btn.classList.remove("busy","done")}
 }
+/* всплывающее меню действий */
+function menuPop(anchor,items){
+  let pop=$("#menu-pop");if(!pop){pop=document.createElement("div");pop.id="menu-pop";document.body.appendChild(pop)}
+  pop.innerHTML=items.map((it,i)=>`<button class="mi ${it.danger?"danger":""}" data-i="${i}">${it.ic||""}<span>${esc(it.l)}</span></button>`).join("");
+  const r=anchor.getBoundingClientRect();
+  pop.style.left=Math.max(8,Math.min(r.right-210,innerWidth-218))+"px";pop.style.top=(r.bottom+scrollY+6)+"px";
+  pop.classList.add("show");
+  pop.querySelectorAll(".mi").forEach(b=>b.onclick=()=>{hidePop();items[+b.dataset.i].fn()});
+  setTimeout(()=>document.addEventListener("click",function h(e){if(!pop.contains(e.target)){hidePop();document.removeEventListener("click",h)}}),0);
+}
+function hidePop(){$("#st-pop")?.classList.remove("show");$("#menu-pop")?.classList.remove("show")}
 
 /* ═══════════════════ анимации и графика ═══════════════════ */
 function kick(root){ /* запускает переходы ширин/высот/дуг после отрисовки */
@@ -152,12 +182,15 @@ document.addEventListener("click",e=>{const g=e.target.closest("[data-go]");if(g
 const skKpis=()=>[0,1,2,3].map(i=>`<div class="glass kpi" style="--i:${i}"><span class="sk" style="width:90px;height:10px"></span><span class="sk" style="width:130px;height:26px;margin:12px 0 8px"></span><span class="sk" style="width:150px;height:10px"></span></div>`).join("");
 const skRows=n=>Array.from({length:n},()=>`<div class="ship sk-row"><span class="sk" style="width:38%;height:15px"></span><span class="sk" style="width:24%;height:11px;margin-top:8px"></span><span class="sk" style="width:100%;height:3px;margin-top:20px"></span></div>`).join("");
 const skAside=()=>[0,1,2].map(()=>`<div class="glass card"><span class="sk" style="width:120px;height:10px;margin-bottom:14px"></span><span class="sk" style="width:100%;height:12px;margin-bottom:10px"></span><span class="sk" style="width:80%;height:12px"></span></div>`).join("");
+const skSub=()=>`<span class="sk" style="width:220px;height:12px;margin-top:6px"></span>`;
 
 /* ═══════════════════ состояние ═══════════════════ */
-const S={user:null,section:"ships",tab:"",q:"",stores:[],partners:[],ships:null,sum:null,pays:null,
-  pay:{kind:"",supplier:"",from:"",to:"",q:""},kpiPrev:{}};
+const S={user:null,section:"ships",tab:"",q:"",stores:[],partners:[],ships:null,sum:null,pays:null,inv:null,
+  f:{period:"all",from:"",to:"",store:"",supplier:"",sort:"date_desc"},
+  sp:{period:"all",from:"",to:""},
+  pay:{kind:"",supplier:"",from:"",to:"",q:""},settings:{currency:"USD",rate:null},kpiPrev:{}};
 
-/* ═══════════════════ вход ═══════════════════ */
+/* ═══════════════════ вход (только облачный режим) ═══════════════════ */
 function showLogin(){$("#login-ov").classList.add("show");$("#app").classList.add("off")}
 $("#login-form").onsubmit=async e=>{
   e.preventDefault();$("#l-err").textContent="";const btn=$("#l-btn");btn.classList.add("busy");
@@ -198,58 +231,83 @@ document.addEventListener("keydown",e=>{
   if(typing||modalOpen||e.metaKey||e.ctrlKey||e.altKey)return;
   if(e.key==="/"){e.preventDefault();($("#q")||$("#pq"))?.focus();return}
   if(/^[nт]$/i.test(e.key)){e.preventDefault();
-    if(S.section==="payments")payModal();else if(S.section==="partners")partnerModal();else if(S.section==="stores")storeModal();else shipModal();return}
+    ({payments:payModal,partners:partnerModal,stores:storeModal,investors:investModal}[S.section]||shipModal)();return}
   if(/^[1-6]$/.test(e.key))go(["ships","payments","partners","investors","stores","summary"][+e.key-1]);
 });
 function headHtml(title,sub,right){
   return `<header class="top"><div><h1>${title}</h1><div class="sub" id="hd-sub">${sub||""}</div></div><div class="hd-r">${right||""}</div></header>`;
 }
 function avatarHtml(){return `<div class="glass avatar" title="${esc(S.user?.name||"")}" data-go="settings">${esc((S.user?.name||"А")[0])}</div>`}
+function periodSel(id,cur){return `<select id="${id}" class="psel">${PERIODS.map(([v,l])=>`<option value="${v}" ${cur===v?"selected":""}>${l}</option>`).join("")}</select>`}
 
 /* ═══════════════════ справочные данные ═══════════════════ */
-async function loadRefs(){[S.stores,S.partners]=await Promise.all([api("/api/stores"),api("/api/partners")])}
+async function loadRefs(){[S.stores,S.partners,S.settings]=await Promise.all([api("/api/stores"),api("/api/partners"),api("/api/settings")])}
 const activeStores=()=>S.stores.filter(s=>s.active);
 const activeSuppliers=()=>S.partners.filter(p=>p.active&&p.is_supplier);
 
 /* ═══════════════════ ПАРТИИ ═══════════════════ */
+function shipParams(){
+  const p=new URLSearchParams();const f=S.f;const[from,to]=periodRange(f.period,f.from,f.to);
+  if(S.tab)p.set("status",S.tab);if(S.q)p.set("q",S.q);
+  if(from)p.set("from",from);if(to)p.set("to",to);if(f.store)p.set("store",f.store);if(f.supplier)p.set("supplier",f.supplier);
+  if(f.sort&&f.sort!=="date_desc")p.set("sort",f.sort);
+  return p;
+}
 async function renderShips(){
-  $("#main").innerHTML=`<div class="view">${headHtml("Партии <span>из Китая</span>",`<span class="sk" style="width:240px;height:12px;margin-top:6px"></span>`,`
+  await loadRefs();
+  const f=S.f;
+  $("#main").innerHTML=`<div class="view">${headHtml("Партии <span>из Китая</span>",skSub(),`
     <div class="srch-w"><span class="srch-ic">${I.search}</span><input class="srch" id="q" placeholder="Поиск: товар, трек, поставщик" value="${esc(S.q)}"><kbd>/</kbd></div>
     <button class="pill" id="add-ship">${I.plus}<span>Новая партия</span></button>${avatarHtml()}`)}
     <div class="kpis" id="kpis">${skKpis()}</div>
     <div class="grid"><div class="glass panel" style="--i:1">
-      <div class="ph"><h2>Партии в работе</h2>
+      <div class="ph"><h2>Партии в работе <span class="cnt" id="sh-cnt"></span></h2>
         <div class="tabs" id="tabs">${[["","Все"],["shipping","В пути"],["new","Не отправлены"],["arrived","Прибыли"],["cancelled","Отменены"]]
           .map(([v,l])=>`<div class="tab${S.tab===v?" on":""}" data-v="${v}">${l}</div>`).join("")}</div></div>
+      <div class="fbar">
+        ${periodSel("f-period",f.period)}
+        <span class="rng" id="f-rng" ${f.period==="custom"?"":"hidden"}><input type="date" id="f-from" value="${f.from}" title="С даты"><input type="date" id="f-to" value="${f.to}" title="По дату"></span>
+        <select id="f-store"><option value="">Все магазины</option>${S.stores.map(s=>`<option value="${s.id}" ${String(f.store)===String(s.id)?"selected":""}>№${esc(s.number)}${s.name?" · "+esc(s.name):""}</option>`).join("")}</select>
+        <select id="f-sup"><option value="">Все поставщики</option>${S.partners.filter(p=>p.is_supplier||p.shipments).map(p=>`<option value="${p.id}" ${String(f.supplier)===String(p.id)?"selected":""}>${esc(p.name)}</option>`).join("")}</select>
+        <span class="sep"></span>
+        <select id="f-sort" title="Сортировка">${SORTS.map(([v,l])=>`<option value="${v}" ${f.sort===v?"selected":""}>${l}</option>`).join("")}</select>
+        <a class="ghost sm" id="f-export" href="/api/export.csv" download title="Выгрузить в Excel по текущему фильтру">${I.down}<span>Excel</span></a>
+      </div>
       <div id="ship-list">${skRows(3)}</div>
     </div><aside id="aside" style="--i:2">${skAside()}</aside></div></div>`;
   $("#add-ship").onclick=()=>shipModal();
   let qt;$("#q").oninput=e=>{clearTimeout(qt);qt=setTimeout(()=>{S.q=e.target.value;loadShips()},300)};
   $$("#tabs .tab").forEach(t=>t.onclick=()=>{S.tab=t.dataset.v;$$("#tabs .tab").forEach(x=>x.classList.toggle("on",x===t));loadShips()});
-  await loadRefs();
+  $("#f-period").onchange=e=>{f.period=e.target.value;$("#f-rng").hidden=f.period!=="custom";if(f.period!=="custom"||(f.from||f.to))loadShips()};
+  $("#f-from").onchange=e=>{f.from=e.target.value;loadShips()};$("#f-to").onchange=e=>{f.to=e.target.value;loadShips()};
+  $("#f-store").onchange=e=>{f.store=e.target.value;loadShips()};$("#f-sup").onchange=e=>{f.supplier=e.target.value;loadShips()};
+  $("#f-sort").onchange=e=>{f.sort=e.target.value;loadShips()};
   await Promise.all([loadShips(),loadSummaryUI()]);
 }
 async function loadShips(opts){
   opts=opts||{};
-  const p=new URLSearchParams();if(S.tab)p.set("status",S.tab);if(S.q)p.set("q",S.q);
+  const p=shipParams();
   const d=await api("/api/shipments?"+p);S.ships=d;
   const el=$("#ship-list");if(!el)return;
+  const ex=$("#f-export");if(ex)ex.href="/api/export.csv?"+p;
+  const cnt=$("#sh-cnt");if(cnt)cnt.textContent=d.totals.count?"· "+d.totals.count:"";
   const openIds=new Set($$("#ship-list .ship.open").map(x=>+x.dataset.id));
+  const filtered=!!(S.tab||S.q||S.f.period!=="all"||S.f.store||S.f.supplier);
   if(!d.rows.length){
-    el.innerHTML=`<div class="empty">${ILL}<b>${S.tab||S.q?"Ничего не найдено":"Партий пока нет"}</b>
-      ${S.tab||S.q?"Попробуйте другой фильтр или запрос":"Создайте первую партию — это займёт минуту"}
-      ${!S.tab&&!S.q?`<br><button class="pill" onclick="shipModal()">${I.plus}<span>Новая партия</span></button>`:""}</div>`;
+    el.innerHTML=`<div class="empty">${ILL}<b>${filtered?"Ничего не найдено":"Партий пока нет"}</b>
+      ${filtered?"Попробуйте другой фильтр или период":"Создайте первую партию — это займёт минуту"}
+      ${!filtered?`<br><button class="pill" onclick="shipModal()">${I.plus}<span>Новая партия</span></button>`:""}</div>`;
   }else{
     el.innerHTML=d.rows.map((s,i)=>shipHtml(s,Math.min(i,10),openIds.has(s.id))).join("")+
      `<div class="ship" style="background:rgba(255,255,255,.03);--i:11"><div class="ship-top" style="cursor:default">
-        <div class="who" style="font-size:13.5px;color:var(--muted)">Итого по фильтру: ${d.totals.count} парт. · ${d.totals.items} поз.</div>
+        <div class="who" style="font-size:13.5px;color:var(--muted)">Итого по фильтру: ${d.totals.count} парт. · ${d.totals.items} поз.${d.totals.closed?` · прибыль по ${d.totals.closed} закрытым ${money(d.totals.profit)}`:""}</div>
         <div class="money"><b>${money(d.totals.amount)}</b><div class="m2">оплачено ${money(d.totals.paid)} · остаток ${money(d.totals.balance)}</div></div></div></div>`;
     bindShipActions();kick(el);
     if(opts.pop){const t=el.querySelector(`.ship[data-id="${opts.pop}"] .tag`);if(t)t.classList.add("pop")}
   }
   const sub=$("#hd-sub");
   if(sub){const live=d.rows.filter(s=>s.status==="shipping").length,n=new Date();
-    sub.innerHTML=`${MONTH[n.getMonth()]} ${n.getFullYear()} · ${d.totals.count} ${plural(d.totals.count,"партия","партии","партий")}`+
+    sub.innerHTML=`${filtered?periodLabel(S.f.period,S.f.from,S.f.to):MONTH[n.getMonth()]+" "+n.getFullYear()} · ${d.totals.count} ${plural(d.totals.count,"партия","партии","партий")}`+
       (live?` · <span class="live-dot"></span>${live} ${live===1?"едет":"едут"} прямо сейчас`:"")}
 }
 function routeHtml(s){
@@ -279,6 +337,9 @@ function shipHtml(s,i,open){
   if(s.status==="arrived"&&s.arrived_date)chips.push(["прибыла "+dRu(s.arrived_date),"ok"]);
   if(s.stores.length)chips.push(["магазин"+(s.stores.length>1?"ы":"")+" №"+s.stores.join(" · №")]);
   if(s.pay_mode==="auto")chips.push([s.payments.length+" "+plural(s.payments.length,"платёж","платежа","платежей"),"info"]);
+  if(s.investors.length)chips.push(["инвестор"+(s.investors.length>1?"ы":"")+": "+s.investors.map(v=>v.name).join(", "),"info"]);
+  if(s.profit!=null)chips.push(["закрыта · прибыль "+money(s.profit,s.currency),"ok"]);
+  if(s.rate&&s.currency!=="KGS")chips.push(["≈ "+money(s.amount*s.rate,"KGS")]);
   const pay=s.amount?Math.min(100,Math.max(0,s.paid/s.amount*100)):0,over=s.balance<-0.004;
   const m2=s.status==="cancelled"?"не считается":over?`переплата <span class="v-rose">${money(-s.balance,s.currency)}</span>`
     :s.balance<=0.004?`<span class="v-green">оплачено полностью</span>`
@@ -292,8 +353,7 @@ function shipHtml(s,i,open){
       <div class="acts">
         <button class="mini-btn" data-pay title="Записать платёж">${I.pay}</button>
         <button class="mini-btn" data-edit title="Редактировать">${I.edit}</button>
-        <button class="mini-btn" data-copy title="Дублировать">${I.copy}</button>
-        <button class="mini-btn del" data-del title="Удалить">${I.trash}</button></div>
+        <button class="mini-btn" data-more title="Ещё действия">${I.more}</button></div>
     </div>
     ${routeHtml(s)}
     ${chips.length?`<div class="chips">${chips.map(([t,c])=>`<span class="chip ${c||""}">${esc(t)}</span>`).join("")}</div>`:""}
@@ -313,6 +373,9 @@ function shipHtml(s,i,open){
             <b class="${p.kind==="refund"?"v-rose":""}">${p.kind==="refund"?"−":""}${money(p.amount,p.currency)}</b></div>`).join("")
           :`<div class="pay-line"><span class="empty-l">${s.paid?"Аванс "+money(s.paid,s.currency)+" введён вручную в карточке партии. Запишите первый платёж — дальше всё посчитается само.":"Платежей пока нет"}</span></div>`}
       </div>
+      ${s.shares.length?`<div class="pays"><div class="pays-h"><span>Доли инвесторов от прибыли ${money(s.profit,s.currency)}</span><button class="lnk" data-profit>изменить</button></div>
+        ${s.shares.map(x=>`<div class="pay-line"><span class="d">${x.kind==="pool"?"пул":"адресно"}</span><span class="n">${esc(x.name)} · ${esc(x.note)}</span><b class="v-green">${money(x.accrued,s.currency)}</b></div>`).join("")}</div>`
+       :s.profit!=null?`<div class="pays"><div class="pays-h"><span>Партия закрыта, прибыль ${money(s.profit,s.currency)}</span><button class="lnk" data-profit>изменить</button></div><div class="pay-line"><span class="empty-l">Инвесторов у этой партии нет — вся прибыль ваша</span></div></div>`:""}
     </div></div></div>`;
 }
 function bindShipActions(){
@@ -320,13 +383,19 @@ function bindShipActions(){
     const id=+el.dataset.id,s=S.ships.rows.find(x=>x.id===id);if(!s)return;
     el.querySelector("[data-open]").onclick=e=>{if(e.target.closest("button"))return;el.classList.toggle("open")};
     el.querySelector("[data-edit]").onclick=()=>shipModal(s);
-    el.querySelector("[data-copy]").onclick=()=>shipModal({...s,id:null,date:todayISO(),status:"new",sent_date:null,arrived_date:null,
-      eta_date:null,track:"",prepaid:0,payments:[],pay_mode:"manual",paid:0});
     el.querySelectorAll("[data-pay]").forEach(b=>b.onclick=()=>payModal({supplier_id:s.supplier_id,shipment_id:s.id}));
-    el.querySelector("[data-del]").onclick=async()=>{
-      if(await confirmBox("Удалить партию?",`${s.supplier_name}, ${dRu(s.date)}, ${s.items.length} поз. на ${money(s.amount,s.currency)}. Партия будет скрыта из списков.`,true)){
-        await api("/api/shipments/"+id,{method:"DELETE"});toast("Партия удалена","ok");loadShips();loadSummaryUI();loadRefs()}};
+    el.querySelectorAll("[data-profit]").forEach(b=>b.onclick=()=>profitModal(s));
     el.querySelector("[data-st]").onclick=e=>{e.stopPropagation();statusPop(e.currentTarget,s)};
+    el.querySelector("[data-more]").onclick=e=>{e.stopPropagation();menuPop(e.currentTarget,[
+      {l:"Дублировать (повторный заказ)",ic:I.copy,fn:()=>shipModal({...s,id:null,date:todayISO(),status:"new",sent_date:null,arrived_date:null,
+        eta_date:null,track:"",prepaid:0,payments:[],pay_mode:"manual",paid:0,profit:null,closed_at:null,investors:[],shares:[]})},
+      {l:s.items.length>1?"Разделить партию":"Разделить (нужно ≥ 2 товаров)",ic:I.split,fn:()=>s.items.length>1?splitModal(s):toast("В партии один товар — делить нечего","err")},
+      {l:s.profit!=null?"Прибыль по партии":"Закрыть партию — ввести прибыль",ic:I.flag,fn:()=>profitModal(s)},
+      {l:"Вложение инвестора в эту партию",ic:I.coins,fn:()=>investModal({shipment_id:s.id})},
+      {l:"Удалить",ic:I.trash,danger:true,fn:async()=>{
+        if(await confirmBox("Удалить партию?",`${s.supplier_name}, ${dRu(s.date)}, ${s.items.length} поз. на ${money(s.amount,s.currency)}. Партия будет скрыта из списков.`,true)){
+          await api("/api/shipments/"+id,{method:"DELETE"});toast("Партия удалена","ok");loadShips();loadSummaryUI();loadRefs()}}},
+    ])};
   });
 }
 function statusPop(btn,s){
@@ -341,7 +410,6 @@ function statusPop(btn,s){
       toast("Статус: "+ST_RU[b.dataset.v],"ok");loadShips({pop:s.id});loadSummaryUI()}catch(e){toast(e.message,"err")}});
   setTimeout(()=>document.addEventListener("click",function h(e){if(!pop.contains(e.target)){hidePop();document.removeEventListener("click",h)}}),0);
 }
-function hidePop(){$("#st-pop").classList.remove("show")}
 
 /* ═══════════════════ плитки и правая колонка ═══════════════════ */
 function kpiHtml(list){
@@ -352,22 +420,28 @@ function kpiHtml(list){
 function runCounters(root){
   root.querySelectorAll(".val[data-v]").forEach(el=>{const k=el.dataset.k,to=+el.dataset.v;counter(el,to,undefined,S.kpiPrev[k]);S.kpiPrev[k]=to});
 }
-async function loadSummaryUI(){
-  const d=await api("/api/summary");S.sum=d;const t=d.tiles,sr=d.series;
+async function loadSummaryUI(range){
+  const p=new URLSearchParams();if(range&&range[0])p.set("from",range[0]);if(range&&range[1])p.set("to",range[1]);
+  const d=await api("/api/summary?"+p);S.sum=d;const t=d.tiles,sr=d.series;const per=!!(range&&(range[0]||range[1]));
   const k=$("#kpis");if(!k)return;
   k.innerHTML=kpiHtml([
-    ["Заказано",t.ordered,"",`${t.ordered_items} ${plural(t.ordered_items,"позиция","позиции","позиций")} · ${t.ordered_count} ${plural(t.ordered_count,"партия","партии","партий")}`,sr.ordered,"#6C8CFF"],
-    ["Отдано поставщикам",t.paid,"v-cyan",t.ordered?Math.round(t.paid/t.ordered*100)+"% от суммы закупок":"—",sr.paid,"#3ED8D0"],
-    ["Остаток к оплате",t.debt_total,"v-amber",t.debt_suppliers?`${t.debt_suppliers} ${plural(t.debt_suppliers,"поставщик ждёт","поставщика ждут","поставщиков ждут")} доплату`:"долгов нет",sr.balance,"#FFB65C"],
-    ["Сейчас в пути",t.transit,"v-green",t.transit_count?`${t.transit_count} парт. · дольше всех ${t.transit_max_days} дн.`:"ничего не едет",sr.sent,"#57E39B"],
+    ["Заказано"+(per?" за период":""),t.ordered,"",`${t.ordered_items} ${plural(t.ordered_items,"позиция","позиции","позиций")} · ${t.ordered_count} ${plural(t.ordered_count,"партия","партии","партий")}`,per?null:sr.ordered,"#6C8CFF"],
+    ["Отдано поставщикам"+(per?" за период":""),t.paid,"v-cyan",t.ordered?Math.round(t.paid/t.ordered*100)+"% от суммы закупок":"—",per?null:sr.paid,"#3ED8D0"],
+    ["Остаток к оплате",t.debt_total,"v-amber",t.debt_suppliers?`${t.debt_suppliers} ${plural(t.debt_suppliers,"поставщик ждёт","поставщика ждут","поставщиков ждут")} доплату`:"долгов нет",per?null:sr.balance,"#FFB65C"],
+    ["Сейчас в пути",t.transit,"v-green",t.transit_count?`${t.transit_count} парт. · дольше всех ${t.transit_max_days} дн.`:"ничего не едет",per?null:sr.sent,"#57E39B"],
   ]);
   runCounters(k);
   const a=$("#aside");if(!a)return;
   a.innerHTML=asideHtml(d);kick(a);
 }
 function asideHtml(d){
-  const t=d.tiles,mx=Math.max(...d.months.map(m=>m.total),1);
+  const t=d.tiles,mx=Math.max(...d.months.map(m=>m.total),1),iv=d.investors;
   return `
+   ${iv.count?`<div class="glass card spot"><h3>Инвесторы · к выплате <button class="lnk" data-go="investors">все →</button></h3>
+     ${iv.top.slice(0,3).map(x=>{const pct=x.accrued?Math.min(100,x.paid_profit/x.accrued*100):0;return `<div class="inv-row">${ringSvg(pct,x.due>0.004?"#FFB65C":"#57E39B",44,5)}
+       <div class="inv-t"><b>${esc(x.name)}</b><span>вложено ${money(x.invested)} · начислено ${money(x.accrued)}</span></div>
+       <div class="inv-v ${x.due>0.004?"v-amber":"v-green"}">${money(x.due)}</div></div>`}).join("")}
+     <div class="stat tot"><span class="l">Обязательства</span><span class="v v-amber">${money(iv.due)}</span></div></div>`:""}
    <div class="glass card spot"><h3>Закупки по месяцам</h3>
      <div class="bars">${d.months.map((m,i)=>`<i ${i===6?'class="cur"':""} data-h="${Math.round(m.total/mx*100)}" title="${ymRu(m.ym)}: заказано ${money(m.total)}, оплачено ${money(m.paid)}"><b data-h="${m.total?Math.min(100,Math.round(m.paid/m.total*100)):0}"></b></i>`).join("")}</div>
      <div class="bl">${d.months.map(m=>`<span>${MON[+m.ym.slice(5)-1]}</span>`).join("")}</div>
@@ -396,13 +470,14 @@ function shipModal(s){
   if(!activeStores().length&&isNew){toast("Сначала добавьте магазин (раздел «Магазины»)","err");return}
   ITEMS=(s?.items||[{}]).map(i=>({...i}));if(!ITEMS.length)ITEMS=[{}];
   const auto=s?.pay_mode==="auto";
+  const defCur=s?.currency||S.settings.currency||"USD",defRate=s?.rate||(isNew?S.settings.rate:null)||"";
   openModal(`<div class="mh"><h2>${isNew?"Новая партия":"Партия — "+esc(s.supplier_name)}</h2><button class="x" data-x>×</button></div>
    <div class="mb"><div class="frm">
     <div class="fg c3"><label>Дата заказа</label><input type="date" id="f-date" value="${s?.date||todayISO()}"></div>
     <div class="fg c6"><label>Поставщик</label><select id="f-sup">
       ${sup.map(p=>`<option value="${p.id}" ${s?.supplier_id===p.id?"selected":""}>${esc(p.name)}</option>`).join("")}</select></div>
     <div class="fg c3"><label>Валюта</label><select id="f-cur">
-      ${["USD","CNY","KGS"].map(c=>`<option ${((s?.currency)||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
+      ${["USD","CNY","KGS"].map(c=>`<option ${defCur===c?"selected":""}>${c}</option>`).join("")}</select></div>
     <div class="fg c3"><label>Статус</label><select id="f-st">
       ${Object.entries(ST_RU).map(([v,l])=>`<option value="${v}" ${((s?.status)||"new")===v?"selected":""}>${l}</option>`).join("")}</select></div>
     <div class="fg c3"><label>Отправлена</label><input type="date" id="f-sent" value="${s?.sent_date||""}"></div>
@@ -411,20 +486,20 @@ function shipModal(s){
     <div class="fg c6"><label>Трек / накладная</label><input id="f-track" value="${esc(s?.track||"")}" placeholder="SF7742019"></div>
     <div class="fg c3"><label>${auto?"Оплачено (по платежам)":"Аванс"}</label><input type="number" step="0.01" id="f-pre" value="${auto?s.paid:(s?.prepaid||"")}" placeholder="0" ${auto?"disabled":""}>
       ${auto?`<div class="hint">считается по ${s.payments.length} ${plural(s.payments.length,"платежу","платежам","платежам")} — менять в разделе «Платежи»</div>`:`<div class="hint">или запишите платёж — тогда считается само</div>`}</div>
-    <div class="fg c3"><label>Курс к сому</label><input type="number" step="0.01" id="f-rate" value="${s?.rate||""}" placeholder="—"></div>
+    <div class="fg c3"><label>Курс к сому</label><input type="number" step="0.01" id="f-rate" value="${defRate}" placeholder="—"></div>
     <div class="fg c12"><label>Комментарий</label><input id="f-note" value="${esc(s?.note||"")}"></div>
    </div>
    <div class="itm-head"><h4>Товары в партии</h4><button class="ghost sm" style="margin-left:auto" id="f-add-itm">${I.plus}<span>Товар</span></button></div>
    <div class="itm-cols"><span>Магазин</span><span>Наименование</span><span class="itm-qty">Кол-во</span><span class="itm-unitcol">Ед.</span><span class="itm-qty">Цена</span><span>Сумма</span><span></span></div>
    <div id="f-items"></div>
-   <div class="msum"><span>Позиций: <b id="m-cnt">0</b></span><span>Сумма: <b id="m-sum">0</b></span><span>Остаток: <b id="m-bal">0</b></span></div>
+   <div class="msum"><span>Позиций: <b id="m-cnt">0</b></span><span>Сумма: <b id="m-sum">0</b></span><span>Остаток: <b id="m-bal">0</b></span><span id="m-kgs"></span></div>
    </div>
    <div class="mf"><span class="hint">⌘S — сохранить</span><button class="ghost" data-x>Отмена</button>
      ${isNew?'<button class="ghost" id="f-save-more">Сохранить и ещё одну</button>':""}
      <button class="pill" id="f-save" data-save>Сохранить</button></div>`);
   renderItems();
   $("#f-add-itm").onclick=()=>{ITEMS.push({});renderItems();const last=$("#f-items .itm-row:last-of-type");last?.querySelector(".i-prod")?.focus()};
-  $("#f-pre").oninput=recalc;$("#f-cur").onchange=recalc;
+  $("#f-pre").oninput=recalc;$("#f-cur").onchange=recalc;$("#f-rate").oninput=recalc;
   $("#f-st").onchange=()=>{const v=$("#f-st").value;
     if(v==="shipping"&&!$("#f-sent").value)$("#f-sent").value=todayISO();
     if(v==="arrived"&&!$("#f-arr").value)$("#f-arr").value=todayISO()};
@@ -474,7 +549,68 @@ function recalc(){
   const sum=ITEMS.reduce((a,i)=>a+(+i.amount||0),0);
   const cnt=ITEMS.filter(i=>i.product||+i.amount).length;
   if($("#m-cnt")){$("#m-cnt").textContent=cnt;$("#m-sum").textContent=money(sum,cur);
-    $("#m-bal").textContent=money(sum-(+$("#f-pre")?.value||0),cur)}
+    $("#m-bal").textContent=money(sum-(+$("#f-pre")?.value||0),cur);
+    const rate=+$("#f-rate")?.value;$("#m-kgs").textContent=rate&&cur!=="KGS"?"≈ "+money(sum*rate,"KGS"):""}
+}
+/* разделить партию */
+function splitModal(s){
+  const auto=s.pay_mode==="auto";
+  openModal(`<div class="mh"><div><h2>Разделить партию</h2><div class="meta">${esc(s.supplier_name)} · ${dRu(s.date)} · ${money(s.amount,s.currency)}</div></div><button class="x" data-x>×</button></div>
+   <div class="mb">
+    <div class="hint" style="margin-bottom:10px">Отметьте товары, которые уходят в новую партию. У неё будет тот же поставщик и дата заказа, свой статус.</div>
+    <div class="pick" id="sp-items">${s.items.map(i=>`<label class="pick-row"><input type="checkbox" value="${i.id}"><span class="badge">№${esc(i.store_number)}</span><span class="pk-n">${esc(i.product)}${i.qty?` <small>${fmtN(i.qty)} ${esc(i.unit||"")}</small>`:""}</span><b>${money(i.amount,s.currency)}</b></label>`).join("")}</div>
+    <div class="frm" style="margin-top:14px">
+      <div class="fg c6"><label>Статус новой партии</label><select id="sp-st">${Object.entries(ST_RU).map(([v,l])=>`<option value="${v}" ${v===s.status?"selected":""}>${l}</option>`).join("")}</select></div>
+      ${auto?"":`<div class="fg c6"><label>Аванс новой партии</label><input type="number" step="0.01" id="sp-pre"><div class="hint" id="sp-pre-h"></div></div>`}
+    </div>
+    ${auto?`<div class="hint" style="margin:14px 0 8px">По партии есть платежи. Отметьте, какие перенести на новую партию (целиком) — остальные останутся на исходной:</div>
+      <div class="pick" id="sp-pays">${s.payments.map(p=>`<label class="pick-row"><input type="checkbox" value="${p.id}"><span class="tag k-${p.kind}" style="cursor:default">${KIND_RU[p.kind]}</span><span class="pk-n">${dRu(p.date)}${p.note?" · "+esc(p.note):""}</span><b>${p.kind==="refund"?"−":""}${money(p.amount,p.currency)}</b></label>`).join("")}</div>`:""}
+    <div class="split-sum" id="sp-sum"></div>
+   </div>
+   <div class="mf"><button class="ghost" data-x>Отмена</button><button class="pill" id="sp-ok" data-save>Разделить</button></div>`,"mid");
+  const sel=()=>[...$$("#sp-items input:checked")].map(x=>+x.value);
+  const rc=()=>{
+    const ids=sel();const msum=s.items.filter(i=>ids.includes(i.id)).reduce((a,i)=>a+(i.amount||0),0),osum=s.amount-msum;
+    let pn=0,po=0;
+    if(auto){const pids=[...$$("#sp-pays input:checked")].map(x=>+x.value);
+      pn=s.payments.filter(p=>pids.includes(p.id)).reduce((a,p)=>a+(p.kind==="refund"?-p.amount:p.amount),0);po=s.paid-pn}
+    else{const pre=$("#sp-pre");const prop=s.amount?Math.round(s.paid*msum/s.amount*100)/100:0;
+      if(!pre.dataset.touched)pre.value=prop||"";pn=+pre.value||0;po=s.paid-pn;
+      $("#sp-pre-h").textContent=`пропорционально: ${money(prop,s.currency)} · в исходной останется ${money(po,s.currency)}`}
+    $("#sp-sum").innerHTML=`<div><span>Остаётся в исходной</span><b>${s.items.length-ids.length} поз. · ${money(osum,s.currency)}</b><small>оплачено ${money(po,s.currency)} · остаток ${money(osum-po,s.currency)}</small></div>
+      <div><span>Уходит в новую</span><b>${ids.length} поз. · ${money(msum,s.currency)}</b><small>оплачено ${money(pn,s.currency)} · остаток ${money(msum-pn,s.currency)}</small></div>`;
+    $("#sp-ok").disabled=!ids.length||ids.length===s.items.length;};
+  $$("#sp-items input, #sp-pays input").forEach(i=>i.onchange=rc);
+  if(!auto)$("#sp-pre").oninput=e=>{e.target.dataset.touched=1;rc()};
+  rc();
+  $("#sp-ok").onclick=async()=>{
+    const ok=await withBusy($("#sp-ok"),async()=>{
+      const body={item_ids:sel(),status:$("#sp-st").value};
+      if(auto)body.payment_ids=[...$$("#sp-pays input:checked")].map(x=>+x.value);else body.prepaid_new=+$("#sp-pre").value||0;
+      const r=await api(`/api/shipments/${s.id}/split`,{method:"POST",body});
+      toast(`Партия разделена: новая на ${money(r.new.amount,r.new.currency)}, в исходной ${money(r.old.amount,r.old.currency)}`,"ok")});
+    if(ok){closeModal();refreshAfterPay()}
+  };
+}
+/* закрыть партию — прибыль */
+function profitModal(s){
+  const closed=s.profit!=null;
+  openModal(`<div class="mh"><div><h2>${closed?"Прибыль по партии":"Закрыть партию"}</h2><div class="meta">${esc(s.supplier_name)} · ${dRu(s.date)} · ${money(s.amount,s.currency)}</div></div><button class="x" data-x>×</button></div>
+   <div class="mb"><div class="frm">
+     <div class="fg c6"><label>Прибыль по партии</label><input type="number" step="0.01" id="pf-profit" value="${closed?s.profit:""}" placeholder="0" autofocus>
+       <div class="hint">одним числом, когда товар распродан — от неё считаются доли инвесторов</div></div>
+     <div class="fg c6"><label>Дата закрытия</label><input type="date" id="pf-date" value="${s.closed_at||todayISO()}"></div>
+   </div>
+   <div class="hint" style="margin-top:14px">${s.investors.length
+     ?"Адресные вложения в эту партию: "+s.investors.map(v=>esc(v.name)+" — "+money(v.amount)+" ("+termsRu(v)+")").join("; ")
+     :"Адресных вложений в партию нет — прибыль пойдёт в общий пул инвесторов, если он есть. Иначе вся прибыль ваша."}</div>
+   </div>
+   <div class="mf">${closed?`<button class="ghost" id="pf-reopen">Открыть заново</button>`:""}<button class="ghost" data-x>Отмена</button><button class="pill" id="pf-ok" data-save>${closed?"Сохранить":"Закрыть партию"}</button></div>`,"mid");
+  $("#pf-ok").onclick=async()=>{
+    const ok=await withBusy($("#pf-ok"),async()=>{const v=$("#pf-profit").value;if(v==="")throw new Error("Укажите прибыль по партии");
+      await api("/api/shipments/"+s.id,{method:"PATCH",body:{profit:+v,closed_at:$("#pf-date").value||null}});toast(closed?"Прибыль изменена":"Партия закрыта, доли начислены","ok")});
+    if(ok){closeModal();refreshAfterPay()}};
+  if(closed)$("#pf-reopen").onclick=async()=>{try{await api("/api/shipments/"+s.id,{method:"PATCH",body:{profit:null}});toast("Партия открыта заново","ok");closeModal();refreshAfterPay()}catch(e){toast(e.message,"err")}};
 }
 
 /* ═══════════════════ ПЛАТЕЖИ ═══════════════════ */
@@ -482,13 +618,14 @@ function refreshAfterPay(){
   if(S.section==="ships"){loadShips();loadSummaryUI();loadRefs()}
   else if(S.section==="payments"){loadPayments();loadPayKpis()}
   else if(S.section==="partners")loadPartners();
+  else if(S.section==="investors")loadInvestors();
   else if(S.section==="stores")loadStores();
   else if(S.section==="summary")renderSummary();
 }
 async function renderPayments(){
   await loadRefs();
   const sup=S.partners.filter(p=>p.is_supplier||p.shipments||p.payments);
-  $("#main").innerHTML=`<div class="view">${headHtml("Платежи <span>поставщикам</span>",`<span class="sk" style="width:200px;height:12px;margin-top:6px"></span>`,`
+  $("#main").innerHTML=`<div class="view">${headHtml("Платежи <span>поставщикам</span>",skSub(),`
      <a class="ghost" href="/api/payments.csv" download title="Скачать таблицу платежей">${I.down}<span>Excel</span></a>
      <button class="pill" id="add-pay">${I.plus}<span>Платёж</span></button>${avatarHtml()}`)}
     <div class="kpis" id="pkpis">${skKpis()}</div>
@@ -580,7 +717,7 @@ async function payModal(pre,p,after){
       ${KINDS.map(k=>`<button type="button" data-k="${k}">${KIND_RU[k]}</button>`).join("")}</div></div>
     <div class="fg c5"><label>Сумма</label><div class="amt-w"><input type="number" step="0.01" min="0" id="y-amt" value="${p?.amount||pre.amount||""}" placeholder="0" autofocus>
       <button type="button" class="lnk" id="y-rest" hidden>весь остаток</button></div></div>
-    <div class="fg c3"><label>Валюта</label><select id="y-cur">${["USD","CNY","KGS"].map(c=>`<option ${((p?.currency)||pre.currency||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
+    <div class="fg c3"><label>Валюта</label><select id="y-cur">${["USD","CNY","KGS"].map(c=>`<option ${((p?.currency)||pre.currency||S.settings.currency||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
     <div class="fg c4"><label>Способ</label><select id="y-meth"><option value="">—</option>${METHODS.map(m=>`<option ${(p?.method||"")===m?"selected":""}>${m}</option>`).join("")}</select></div>
     <div class="fg c12"><label>Комментарий</label><input id="y-note" value="${esc(p?.note||"")}" placeholder="за что, кому передали"></div>
    </div></div>
@@ -618,7 +755,7 @@ async function payModal(pre,p,after){
 
 /* ═══════════════════ ПОСТАВЩИКИ ═══════════════════ */
 async function renderPartners(){
-  $("#main").innerHTML=`<div class="view">${headHtml("Поставщики <span>и партнёры</span>",`<span class="sk" style="width:200px;height:12px;margin-top:6px"></span>`,
+  $("#main").innerHTML=`<div class="view">${headHtml("Поставщики <span>и партнёры</span>",skSub(),
     `<button class="pill" id="add-p">${I.plus}<span>Контрагент</span></button>${avatarHtml()}`)}
     <div class="glass panel" style="--i:1"><div class="list-wrap" id="p-list">${skRows(3)}</div></div></div>`;
   $("#add-p").onclick=()=>partnerModal();
@@ -631,7 +768,7 @@ async function loadPartners(){
       <th class="num">Оборот</th><th>Отдано</th><th class="num">Долг</th><th class="num">В пути</th><th></th></tr></thead><tbody>
     ${rows.map((p,i)=>`<tr class="clk ${p.active?"":"inactive"}" data-id="${p.id}" style="--i:${Math.min(i,12)}">
       <td><b>${esc(p.name)}</b>${p.active?"":" <span class='chip'>скрыт</span>"}</td>
-      <td style="color:var(--muted)">${[p.is_supplier?"поставщик":"",p.is_investor?"инвестор":""].filter(Boolean).join(" + ")||"—"}</td>
+      <td style="color:var(--muted)">${[p.is_supplier?"поставщик":"",p.is_investor?"инвестор":""].filter(Boolean).join(" + ")||"—"}${p.is_investor&&p.inv_due>0.004?`<div class="meta v-amber">к выплате ${money(p.inv_due)}</div>`:""}</td>
       <td style="color:var(--muted)">${esc([p.city,p.contact].filter(Boolean).join(" · "))||"—"}</td>
       <td class="num">${p.shipments}</td><td class="num">${money(p.total)}</td>
       <td><span>${money(p.paid)}</span><div class="pb"><i data-w="${p.total?Math.min(100,Math.max(0,p.paid/p.total*100)).toFixed(0):0}"></i></div></td>
@@ -657,7 +794,7 @@ async function partnerCard(pid,tab){
   const pct=p.total?Math.min(100,Math.max(0,p.paid/p.total*100)):0;
   const types=[p.is_supplier?"поставщик":"",p.is_investor?"инвестор":""].filter(Boolean).join(" + ");
   openModal(`<div class="mh"><div><h2>${esc(p.name)}</h2><div class="meta">${esc([types,p.city,p.contact].filter(Boolean).join(" · "))}</div></div>
-     <div class="mh-acts"><button class="ghost sm" id="pc-pay">${I.pay}<span>Платёж</span></button><button class="ghost sm" id="pc-edit" title="Изменить">${I.edit}</button><button class="x" data-x>×</button></div></div>
+     <div class="mh-acts">${p.is_investor?`<button class="ghost sm" id="pc-inv" title="Карточка инвестора">${I.coins}<span>Инвестор</span></button>`:""}<button class="ghost sm" id="pc-pay">${I.pay}<span>Платёж</span></button><button class="ghost sm" id="pc-edit" title="Изменить">${I.edit}</button><button class="x" data-x>×</button></div></div>
    <div class="mb">
      <div class="pc-stats"><div class="pc-ring">${ringSvg(pct,pct>=99.5?"#57E39B":"#3ED8D0",78,7)}<div class="pc-ring-l"><b>${Math.round(pct)}%</b><span>оплачено</span></div></div>
        <div class="pc-grid">
@@ -688,6 +825,7 @@ async function partnerCard(pid,tab){
   $$("#pc-tabs .tab").forEach(t=>t.onclick=()=>{tab=t.dataset.t;$$("#pc-tabs .tab").forEach(x=>x.classList.toggle("on",x===t));body()});
   $("#pc-pay").onclick=()=>payModal({supplier_id:pid},null,again);
   $("#pc-edit").onclick=()=>partnerModal(p,again);
+  if($("#pc-inv"))$("#pc-inv").onclick=()=>investorCard(pid);
 }
 function partnerModal(p,after){
   openModal(`<div class="mh"><h2>${p?"Контрагент":"Новый контрагент"}</h2><button class="x" data-x>×</button></div>
@@ -698,8 +836,8 @@ function partnerModal(p,after){
       <label class="chk"><input type="checkbox" id="p-inv" ${p?.is_investor?"checked":""}> инвестор</label></div></div>
     <div class="fg c6"><label>Город (начало маршрута)</label><input id="p-city" value="${esc(p?.city||"")}" placeholder="Гуанчжоу"></div>
     <div class="fg c6"><label>Контакт (WeChat / WhatsApp)</label><input id="p-contact" value="${esc(p?.contact||"")}"></div>
-    <div class="fg c6"><label>Валюта по умолчанию</label><select id="p-cur">${["USD","CNY","KGS"].map(c=>`<option ${((p?.currency)||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
-    <div class="fg c12"><label>Комментарий</label><input id="p-note" value="${esc(p?.note||"")}"></div>
+    <div class="fg c6"><label>Валюта по умолчанию</label><select id="p-cur">${["USD","CNY","KGS"].map(c=>`<option ${((p?.currency)||S.settings.currency||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
+    <div class="fg c12"><label>Комментарий (условия работы)</label><input id="p-note" value="${esc(p?.note||"")}"></div>
     ${p&&!p.active?'<div class="fg c12"><label class="chk"><input type="checkbox" id="p-act"> показать снова (сейчас скрыт)</label></div>':""}
    </div></div>
    <div class="mf"><button class="ghost" data-x>Отмена</button><button class="pill" id="p-save" data-save>Сохранить</button></div>`,"mid");
@@ -765,36 +903,202 @@ function storeModal(s){
 /* ═══════════════════ ИНВЕСТОРЫ (этап 4) ═══════════════════ */
 async function renderInvestors(){
   await loadRefs();
-  const inv=S.partners.filter(p=>p.is_investor);
-  $("#main").innerHTML=`<div class="view">${headHtml("Инвесторы <span>и доли</span>","вложения · начисления · выплаты",avatarHtml())}
-   <div class="glass panel" style="--i:1"><div class="empty" style="padding:70px 20px">${ILL}
-     <b>Раздел появится на этапе 4</b>
-     Вложения в партии и общий пул, условия «доля от прибыли» и «процент в месяц»,<br>начисления, выплаты и отчёт инвестору одной страницей.
-     ${inv.length?`<div class="chips" style="justify-content:center;margin-top:18px">${inv.map(p=>`<span class="chip">${esc(p.name)}</span>`).join("")}</div>
-     <div style="color:var(--dim);font-size:12.5px;margin-top:10px">Эти контрагенты уже помечены как инвесторы — они подхватятся автоматически</div>`:""}
-   </div></div></div>`;
+  $("#main").innerHTML=`<div class="view">${headHtml("Инвесторы <span>и доли</span>",skSub(),`
+     <button class="ghost" id="add-po">${I.pay}<span>Выплата</span></button>
+     <button class="pill" id="add-inv">${I.plus}<span>Вложение</span></button>${avatarHtml()}`)}
+    <div class="kpis" id="ikpis">${skKpis()}</div>
+    <div class="glass panel" style="--i:1"><div class="list-wrap" id="i-list">${skRows(3)}</div></div></div>`;
+  $("#add-inv").onclick=()=>investModal();$("#add-po").onclick=()=>payoutModal();
+  await loadInvestors();
+}
+async function loadInvestors(){
+  const d=await api("/api/investors");S.inv=d;const el=$("#i-list");if(!el)return;const t=d.totals,rows=d.rows;
+  const k=$("#ikpis");
+  k.innerHTML=kpiHtml([
+    ["Вложено",t.invested,"",`${rows.length} ${plural(rows.length,"инвестор","инвестора","инвесторов")}${t.pool_total?" · общий пул "+money(t.pool_total):""}`],
+    ["Начислено",t.accrued,"v-cyan",t.closed_count?`прибыль ${t.closed_count} закрыт${plural(t.closed_count,"ой партии","ых партий","ых партий")}: ${money(t.closed_profit)}`:"закрытых партий пока нет"],
+    ["Выплачено долей",t.paid_profit,"v-green",`тело вложений возвращено ${money(t.paid_principal)}`],
+    ["К выплате",t.due,"v-amber",t.due>0.004?"начислено минус выплачено":"всё выплачено"],
+  ]);runCounters(k);
+  const sub=$("#hd-sub");if(sub)sub.textContent=`${rows.length} ${plural(rows.length,"инвестор","инвестора","инвесторов")} · к выплате ${money(t.due)} · у нас их денег ${money(t.principal_out)}`;
+  el.innerHTML=rows.length?`<table class="list-tbl"><thead><tr><th>Имя</th><th class="num">Вложено</th><th>Условие</th><th class="num">Начислено</th><th class="num">Выплачено</th><th class="num">К выплате</th><th></th></tr></thead><tbody>
+    ${rows.map((p,i)=>`<tr class="clk ${p.active?"":"inactive"}" data-id="${p.id}" style="--i:${Math.min(i,12)}">
+      <td><b>${esc(p.name)}</b>${p.contact?`<div class="meta">${esc(p.contact)}</div>`:""}</td>
+      <td class="num">${money(p.invested)}${p.principal_out<p.invested-0.004?`<div class="meta">у нас ${money(p.principal_out)}</div>`:""}</td>
+      <td style="color:var(--muted)">${p.terms?termsRu(p):"—"}${p.pool_share?`<div class="meta">пул ${p.pool_share}%</div>`:""}${p.open_count?`<div class="meta">${p.open_count} ${plural(p.open_count,"партия","партии","партий")} ещё не закрыт${p.open_count===1?"а":"ы"}</div>`:""}</td>
+      <td class="num v-cyan">${money(p.accrued)}</td>
+      <td class="num">${money(p.paid_profit)}<div class="pb" style="margin-left:auto"><i data-w="${p.accrued?Math.min(100,p.paid_profit/p.accrued*100).toFixed(0):0}"></i></div></td>
+      <td class="num" style="color:${p.due>0.004?"var(--amber)":"var(--green)"}"><b>${money(p.due)}</b></td>
+      <td><div class="acts"><button class="mini-btn" data-inv title="Вложение">${I.coins}</button><button class="mini-btn" data-po title="Выплата">${I.pay}</button><a class="mini-btn" data-rep href="/api/investors/${p.id}/report" target="_blank" title="Отчёт инвестору">${I.doc}</a></div></td>
+    </tr>`).join("")}</tbody></table>`
+    :`<div class="empty">${ILL}<b>Инвесторов пока нет</b>Запишите первое вложение — контрагент станет инвестором автоматически<br><button class="pill" onclick="investModal()">${I.plus}<span>Вложение</span></button></div>`;
+  kick(el);
+  el.querySelectorAll("tr[data-id]").forEach(tr=>{
+    const p=rows.find(x=>x.id===+tr.dataset.id);
+    tr.onclick=e=>{if(e.target.closest("button,a"))return;investorCard(p.id)};
+    tr.querySelector("[data-inv]").onclick=()=>investModal({investor_id:p.id});
+    tr.querySelector("[data-po]").onclick=()=>payoutModal({investor_id:p.id});
+  });
+}
+async function investorCard(iid,tab){
+  tab=tab||"inv";
+  let p;try{p=await api("/api/investors/"+iid)}catch(e){toast(e.message,"err");return}
+  const pct=p.accrued?Math.min(100,Math.max(0,p.paid_profit/p.accrued*100)):0;
+  openModal(`<div class="mh"><div><h2>${esc(p.name)}</h2><div class="meta">инвестор${p.contact?" · "+esc(p.contact):""}${p.note?" · "+esc(p.note):""}</div></div>
+     <div class="mh-acts"><a class="ghost sm" href="/api/investors/${iid}/report" target="_blank">${I.doc}<span>Отчёт</span></a><button class="ghost sm" id="ic-inv">${I.coins}<span>Вложение</span></button><button class="ghost sm" id="ic-po">${I.pay}<span>Выплата</span></button><button class="x" data-x>×</button></div></div>
+   <div class="mb">
+     <div class="pc-stats"><div class="pc-ring">${ringSvg(pct,p.due>0.004?"#FFB65C":"#57E39B",78,7)}<div class="pc-ring-l"><b>${Math.round(pct)}%</b><span>выплачено</span></div></div>
+       <div class="pc-grid">
+         <div class="pc-st"><span>Вложено</span><b>${money(p.invested)}</b><div class="meta">у нас ${money(p.principal_out)}</div></div>
+         <div class="pc-st"><span>Начислено</span><b class="v-cyan">${money(p.accrued)}</b></div>
+         <div class="pc-st"><span>Выплачено долей</span><b class="v-green">${money(p.paid_profit)}</b></div>
+         <div class="pc-st"><span>К выплате</span><b class="${p.due>0.004?"v-amber":"v-green"}">${money(p.due)}</b></div></div></div>
+     <div class="tabs" id="ic-tabs" style="margin-left:0;display:inline-flex"><div class="tab${tab==="inv"?" on":""}" data-t="inv">Вложения · ${p.investments.length}</div><div class="tab${tab==="po"?" on":""}" data-t="po">Выплаты · ${p.payouts.length}</div></div>
+     <div class="pc-list" id="ic-body"></div></div>`,"wide");
+  kick($("#modal"));
+  const again=()=>{investorCard(iid,tab);refreshAfterPay()};
+  const body=()=>{const b=$("#ic-body");
+    if(tab==="inv"){
+      b.innerHTML=p.investments.length?p.investments.map((v,i)=>invRowHtml(v,i)).join(""):`<div class="empty"><b>Вложений нет</b></div>`;
+      b.querySelectorAll(".pay-row[data-id]").forEach(el=>{const v=p.investments.find(x=>x.id===+el.dataset.id);
+        el.querySelector("[data-edit]").onclick=()=>investModal({},v,again);
+        el.querySelector("[data-del]").onclick=async()=>{if(await confirmBox("Удалить вложение?",`${dRu(v.date)}, ${money(v.amount,v.currency)}. Начисления пересчитаются.`,true)){try{await api("/api/investments/"+v.id,{method:"DELETE"});toast("Вложение удалено","ok");again()}catch(e){toast(e.message,"err")}}}});
+    }else{
+      b.innerHTML=p.payouts.length?p.payouts.map((o,i)=>poRowHtml(o,i)).join(""):`<div class="empty"><b>Выплат ещё не было</b></div>`;
+      b.querySelectorAll(".pay-row[data-id]").forEach(el=>{const o=p.payouts.find(x=>x.id===+el.dataset.id);
+        el.querySelector("[data-edit]").onclick=()=>payoutModal({},o,again);
+        el.querySelector("[data-del]").onclick=async()=>{if(await confirmBox("Удалить выплату?",`${dRu(o.date)}, ${money(o.amount,o.currency)}.`,true)){try{await api("/api/payouts/"+o.id,{method:"DELETE"});toast("Выплата удалена","ok");again()}catch(e){toast(e.message,"err")}}}});
+    }};
+  body();
+  $$("#ic-tabs .tab").forEach(t=>t.onclick=()=>{tab=t.dataset.t;$$("#ic-tabs .tab").forEach(x=>x.classList.toggle("on",x===t));body()});
+  $("#ic-inv").onclick=()=>investModal({investor_id:iid},null,again);
+  $("#ic-po").onclick=()=>payoutModal({investor_id:iid},null,again);
+}
+function invRowHtml(v,i){
+  const[y,m,dd]=v.date.split("-");
+  const target=v.shipment_id?`партия от ${dRu(v.ship_date)} · ${esc(v.ship_supplier||"")} · ${money(v.ship_amount)}${v.ship_deleted?" (удалена)":v.ship_profit!=null?" · закрыта, прибыль "+money(v.ship_profit):" · ещё не закрыта"}`:"общий пул";
+  return `<div class="pay-row spot" data-id="${v.id}" style="--i:${i}">
+    <div class="pd"><b>${+dd}</b><span>${MON[+m-1]} ${y.slice(2)}</span></div>
+    <div class="pw"><div class="who">${money(v.amount,v.currency)} <span class="tag ${v.terms==="fixed"?"k-prepay":"k-final"}" style="cursor:default;margin-left:6px">${termsRu(v)}</span></div><div class="meta">${target}${v.end_date?" · возвращено "+dRu(v.end_date):""}${v.note?" · "+esc(v.note):""}</div></div>
+    <div class="money" style="min-width:150px"><b class="v-cyan">${money(v.accrued,v.currency)}</b><div class="m2">${esc(v.accrual_note)}</div></div>
+    <div class="acts"><button class="mini-btn" data-edit title="Изменить">${I.edit}</button><button class="mini-btn del" data-del title="Удалить">${I.trash}</button></div></div>`;
+}
+function poRowHtml(o,i){
+  const[y,m,dd]=o.date.split("-");
+  return `<div class="pay-row spot" data-id="${o.id}" style="--i:${i}">
+    <div class="pd"><b>${+dd}</b><span>${MON[+m-1]} ${y.slice(2)}</span></div>
+    <div class="pw"><div class="who">${esc(o.investor_name||"")}</div><div class="meta">${o.note?esc(o.note):"—"}</div></div>
+    <span class="tag ${o.kind==="profit"?"k-final":"k-prepay"}" style="cursor:default">${PO_RU[o.kind]}</span>
+    <div class="money"><b>${money(o.amount,o.currency)}</b></div>
+    <div class="acts"><button class="mini-btn" data-edit title="Изменить">${I.edit}</button><button class="mini-btn del" data-del title="Удалить">${I.trash}</button></div></div>`;
+}
+async function investModal(pre,v,after){
+  pre=pre||{};
+  await loadRefs();
+  const cands=S.partners.filter(x=>x.active).sort((a,b)=>(b.is_investor-a.is_investor)||a.name.localeCompare(b.name));
+  if(!cands.length){toast("Сначала добавьте контрагента (раздел «Поставщики»)","err");return}
+  const invId=v?.investor_id||pre.investor_id||cands[0].id;
+  let terms=v?.terms||pre.terms||"share";
+  const ships=(await api("/api/shipments?sort=date_desc")).rows.filter(s=>s.status!=="cancelled"||s.id===(v?.shipment_id||pre.shipment_id));
+  const want=v?.shipment_id||pre.shipment_id||"";
+  openModal(`<div class="mh"><h2>${v?"Вложение":"Новое вложение"}</h2><button class="x" data-x>×</button></div>
+   <div class="mb"><div class="frm">
+    <div class="fg c4"><label>Дата</label><input type="date" id="v-date" value="${v?.date||todayISO()}"></div>
+    <div class="fg c8"><label>Инвестор</label><select id="v-inv">${cands.map(x=>`<option value="${x.id}" ${x.id===invId?"selected":""}>${esc(x.name)}${x.is_investor?"":" (станет инвестором)"}</option>`).join("")}</select></div>
+    <div class="fg c12"><label>Куда вложил</label><select id="v-ship"><option value="">Общий пул — доля от прибыли всех партий без адресных вложений</option>${ships.map(s=>`<option value="${s.id}" ${s.id===want?"selected":""}>${dRu(s.date)} · ${esc(s.supplier_name)} · ${money(s.amount,s.currency)} · ${s.profit!=null?"закрыта, прибыль "+money(s.profit):ST_RU[s.status]}</option>`).join("")}</select></div>
+    <div class="fg c12"><label>Условие</label><div class="seg-ctl two" id="v-terms"><i class="thumb"></i>${TERMS.map(k=>`<button type="button" data-k="${k}">${TERMS_RU[k]}</button>`).join("")}</div></div>
+    <div class="fg c4"><label>Сумма</label><input type="number" step="0.01" min="0" id="v-amt" value="${v?.amount||pre.amount||""}" placeholder="0" autofocus></div>
+    <div class="fg c3"><label>Валюта</label><select id="v-cur">${["USD","CNY","KGS"].map(c=>`<option ${((v?.currency)||S.settings.currency||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
+    <div class="fg c5"><label id="v-val-l">Доля, % от прибыли</label><input type="number" step="0.1" min="0" max="100" id="v-val" value="${v?.terms_value??""}" placeholder="30"></div>
+    <div class="fg c6" id="v-end-w" hidden><label>Дата возврата вложения (если вернули)</label><input type="date" id="v-end" value="${v?.end_date||""}"><div class="hint">процент начисляется до этой даты; пусто — по сегодня</div></div>
+    <div class="fg c12"><label>Комментарий</label><input id="v-note" value="${esc(v?.note||"")}" placeholder="условия договорённости"></div>
+   </div><div class="hint" id="v-hint" style="margin-top:12px"></div></div>
+   <div class="mf"><span class="hint">⌘S — сохранить</span><button class="ghost" data-x>Отмена</button><button class="pill" id="v-save" data-save>${v?"Сохранить":"Записать вложение"}</button></div>`,"mid");
+  const hint=()=>{const sid=+$("#v-ship").value;const s=ships.find(x=>x.id===sid);const val=+$("#v-val").value||0,amt=+$("#v-amt").value||0;
+    let h="";
+    if(terms==="fixed")h=`Начисляется ${val}% от ${money(amt)} за каждый полный месяц — это ${money(amt*val/100)} в месяц.`;
+    else if(s)h=s.profit!=null?`Партия закрыта с прибылью ${money(s.profit)} — инвестору причитается ${money(s.profit*val/100)}.`:`Доля начислится, когда партия будет закрыта с прибылью (меню партии → «Закрыть партию»).`;
+    else h=`Доля пула = вложение ÷ все вложения в пул. От прибыли каждой закрытой партии без адресных вложений инвестор получает ${val}% × свою долю пула.`;
+    $("#v-hint").textContent=h};
+  const setTerms=k=>{terms=k;$$("#v-terms button").forEach(b=>b.classList.toggle("on",b.dataset.k===k));$("#v-terms .thumb").style.transform=`translateX(${TERMS.indexOf(k)*100}%)`;
+    $("#v-val-l").textContent=k==="fixed"?"Процент в месяц":"Доля, % от прибыли";$("#v-end-w").hidden=k!=="fixed";hint()};
+  setTerms(terms);$$("#v-terms button").forEach(b=>b.onclick=()=>setTerms(b.dataset.k));
+  ["v-ship","v-val","v-amt"].forEach(id=>$("#"+id).addEventListener("input",hint));hint();
+  $("#v-save").onclick=async()=>{
+    const ok=await withBusy($("#v-save"),async()=>{
+      const body={date:$("#v-date").value,investor_id:+$("#v-inv").value,shipment_id:+$("#v-ship").value||null,amount:+$("#v-amt").value,currency:$("#v-cur").value,
+        terms,terms_value:+$("#v-val").value||0,end_date:terms==="fixed"?($("#v-end").value||null):null,note:$("#v-note").value};
+      await api(v?"/api/investments/"+v.id:"/api/investments",{method:v?"PATCH":"POST",body});toast(v?"Вложение изменено":"Вложение записано","ok")});
+    if(ok){closeModal();(after||refreshAfterPay)()}
+  };
+}
+async function payoutModal(pre,o,after){
+  pre=pre||{};
+  await loadRefs();
+  const cands=S.partners.filter(x=>x.is_investor||x.id===(o?.investor_id||pre.investor_id));
+  if(!cands.length){toast("Инвесторов пока нет — сначала запишите вложение","err");return}
+  const invId=o?.investor_id||pre.investor_id||cands[0].id;
+  let kind=o?.kind||pre.kind||"profit";let calc=null;
+  openModal(`<div class="mh"><h2>${o?"Выплата":"Выплата инвестору"}</h2><button class="x" data-x>×</button></div>
+   <div class="mb"><div class="frm">
+    <div class="fg c4"><label>Дата</label><input type="date" id="o-date" value="${o?.date||todayISO()}"></div>
+    <div class="fg c8"><label>Инвестор</label><select id="o-inv">${cands.map(x=>`<option value="${x.id}" ${x.id===invId?"selected":""}>${esc(x.name)}</option>`).join("")}</select><div class="hint" id="o-hint">Загрузка…</div></div>
+    <div class="fg c12"><label>Тип выплаты</label><div class="seg-ctl two" id="o-kind"><i class="thumb"></i>${PO_KINDS.map(k=>`<button type="button" data-k="${k}">${PO_RU[k]}</button>`).join("")}</div></div>
+    <div class="fg c6"><label>Сумма</label><div class="amt-w"><input type="number" step="0.01" min="0" id="o-amt" value="${o?.amount||pre.amount||""}" placeholder="0" autofocus><button type="button" class="lnk" id="o-rest" hidden>всё</button></div></div>
+    <div class="fg c6"><label>Валюта</label><select id="o-cur">${["USD","CNY","KGS"].map(c=>`<option ${((o?.currency)||S.settings.currency||"USD")===c?"selected":""}>${c}</option>`).join("")}</select></div>
+    <div class="fg c12"><label>Комментарий</label><input id="o-note" value="${esc(o?.note||"")}" placeholder="за какие партии, как передали"></div>
+   </div></div>
+   <div class="mf"><span class="hint">⌘S — сохранить</span><button class="ghost" data-x>Отмена</button><button class="pill" id="o-save" data-save>${o?"Сохранить":"Записать выплату"}</button></div>`,"mid");
+  const hint=()=>{const h=$("#o-hint"),r=$("#o-rest");if(!calc){h.textContent="";r.hidden=true;return}
+    h.innerHTML=`Начислено <b>${money(calc.accrued)}</b>, выплачено долей <b>${money(calc.paid_profit)}</b>, к выплате <b>${money(calc.due)}</b> · тело вложения у нас <b>${money(calc.principal_out)}</b>`;
+    const v=kind==="profit"?calc.due:calc.principal_out;r.hidden=!(v>0.004);r.dataset.v=v;r.textContent=kind==="profit"?"весь остаток":"всё тело"};
+  const setKind=k=>{kind=k;$$("#o-kind button").forEach(b=>b.classList.toggle("on",b.dataset.k===k));$("#o-kind .thumb").style.transform=`translateX(${PO_KINDS.indexOf(k)*100}%)`;hint()};
+  setKind(kind);$$("#o-kind button").forEach(b=>b.onclick=()=>setKind(b.dataset.k));
+  const loadCalc=async()=>{try{calc=await api("/api/investors/"+$("#o-inv").value)}catch(e){calc=null}hint()};
+  $("#o-inv").onchange=loadCalc;await loadCalc();
+  $("#o-rest").onclick=()=>{$("#o-amt").value=Math.round(+$("#o-rest").dataset.v*100)/100;$("#o-amt").focus()};
+  $("#o-save").onclick=async()=>{
+    const ok=await withBusy($("#o-save"),async()=>{
+      const body={date:$("#o-date").value,investor_id:+$("#o-inv").value,amount:+$("#o-amt").value,currency:$("#o-cur").value,kind,note:$("#o-note").value};
+      await api(o?"/api/payouts/"+o.id:"/api/payouts",{method:o?"PATCH":"POST",body});toast(o?"Выплата изменена":"Выплата записана","ok")});
+    if(ok){closeModal();(after||refreshAfterPay)()}
+  };
 }
 
 /* ═══════════════════ СВОДКА ═══════════════════ */
 async function renderSummary(){
-  $("#main").innerHTML=`<div class="view">${headHtml("Сводка","вся картина за всё время",
-    `<a class="ghost" href="/api/export.csv" download>${I.down}<span>Партии в Excel</span></a>${avatarHtml()}`)}
+  const sp=S.sp;
+  $("#main").innerHTML=`<div class="view">${headHtml("Сводка",skSub(),
+    `${periodSel("sp-period",sp.period)}<span class="rng" id="sp-rng" ${sp.period==="custom"?"":"hidden"}><input type="date" id="sp-from" value="${sp.from}"><input type="date" id="sp-to" value="${sp.to}"></span>
+     <a class="ghost" id="sp-export" href="/api/export.csv" download>${I.down}<span>Партии в Excel</span></a>${avatarHtml()}`)}
    <div class="kpis" id="kpis">${skKpis()}</div>
    <div class="grid"><div style="display:flex;flex-direction:column;gap:16px;min-width:0">
-     <div class="glass panel" style="--i:1"><div class="ph"><h2>Партии по статусам</h2></div><div class="mb" id="sum-status">${skRows(1)}</div></div>
-     <div class="glass panel" style="--i:2"><div class="ph"><h2>Топ поставщиков</h2><span class="cnt">по обороту</span></div><div class="mb" id="sum-sup"></div></div>
+     <div class="glass panel" style="--i:1"><div class="ph"><h2>Партии по статусам</h2><span class="cnt" id="st-per"></span></div><div class="mb" id="sum-status">${skRows(1)}</div></div>
+     <div class="glass panel" style="--i:2"><div class="ph"><h2>Топ поставщиков</h2><span class="cnt">по обороту за период</span></div><div class="mb" id="sum-sup"></div></div>
      <div class="glass panel" style="--i:3"><div class="ph"><h2>Закупки по магазинам</h2></div><div class="mb" id="sum-store"></div></div>
      <div class="glass panel" style="--i:4"><div class="ph"><h2>Ожидается прибытие</h2></div><div id="arr-list"></div></div>
    </div><aside id="aside" style="--i:2">${skAside()}</aside></div></div>`;
-  await loadRefs();await loadSummaryUI();
+  const reload=()=>fillSummary();
+  $("#sp-period").onchange=e=>{sp.period=e.target.value;$("#sp-rng").hidden=sp.period!=="custom";if(sp.period!=="custom"||(sp.from||sp.to))reload()};
+  $("#sp-from").onchange=e=>{sp.from=e.target.value;reload()};$("#sp-to").onchange=e=>{sp.to=e.target.value;reload()};
+  await loadRefs();await fillSummary();
+}
+async function fillSummary(){
+  const sp=S.sp,range=periodRange(sp.period,sp.from,sp.to);
+  await loadSummaryUI(range);
   const d=S.sum;if(!$("#sum-status"))return;
+  const per=!!(range[0]||range[1]);
+  const ex=$("#sp-export");if(ex){const p=new URLSearchParams();if(range[0])p.set("from",range[0]);if(range[1])p.set("to",range[1]);ex.href="/api/export.csv?"+p}
+  const sub=$("#hd-sub");if(sub)sub.textContent=(per?"период: "+periodLabel(sp.period,sp.from,sp.to):"вся картина за всё время")+(d.investors.count?` · обязательства перед инвесторами ${money(d.investors.due)}`:"");
+  $("#st-per").textContent=per?periodLabel(sp.period,sp.from,sp.to):"";
   const st=[["shipping","В пути","#FFB65C"],["new","Не отправлены","#8B94A8"],["arrived","Прибыли","#57E39B"],["cancelled","Отменены","#FF7B93"]];
   const parts=st.map(([k,l,c])=>({v:d.by_status[k].amount,color:c,l}));
   const totalAmt=parts.reduce((a,p)=>a+p.v,0),totalCnt=st.reduce((a,[k])=>a+d.by_status[k].count,0);
   $("#sum-status").innerHTML=`<div class="donut-w"><div class="donut-c">${donutSvg(parts.filter(p=>p.v>0),136,13)}
       <div class="dl"><b>${totalCnt}</b><span>${plural(totalCnt,"партия","партии","партий")}</span></div></div>
     <div class="donut-l">${st.map(([k,l,c])=>{const b=d.by_status[k];return `<div class="stat"><span class="l"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:8px"></i>${l} · ${b.count}</span>
-      <span class="v">${money(b.amount)}${totalAmt?` <small style="color:var(--dim);font-weight:500">${Math.round(b.amount/totalAmt*100)}%</small>`:""}</span></div>`}).join("")}</div></div>`;
+      <span class="v">${money(b.amount)}${totalAmt?` <small style="color:var(--dim);font-weight:500">${Math.round(b.amount/totalAmt*100)}%</small>`:""}</span></div>`}).join("")}
+      ${d.tiles.closed_count?`<div class="stat tot"><span class="l">Закрыто с прибылью · ${d.tiles.closed_count}</span><span class="v v-green">${money(d.tiles.profit)}</span></div>`:""}</div></div>`;
   const mxS=Math.max(...d.top_suppliers.map(x=>x[1]),1);
   $("#sum-sup").innerHTML=d.top_suppliers.length?d.top_suppliers.map(([n,v,debt])=>`<div class="hbar"><div class="hb-l"><span>${esc(n)}</span><b>${money(v)}${debt>0.004?`<small>долг ${money(debt)}</small>`:""}</b></div>
       <div class="hb-t"><i data-w="${Math.round(v/mxS*100)}"></i></div></div>`).join(""):`<div class="empty" style="padding:20px"><b>Пока пусто</b></div>`;
@@ -809,30 +1113,38 @@ async function renderSummary(){
 }
 
 /* ═══════════════════ НАСТРОЙКИ ═══════════════════ */
-function renderSettings(){
+async function renderSettings(){
+  await loadRefs();const st=S.settings;
   $("#main").innerHTML=`<div class="view">${headHtml("Настройки","",avatarHtml())}
    <div class="grid two">
-    <div class="glass card spot" style="--i:0"><h3>Данные</h3>
+    <div class="glass card spot" style="--i:0"><h3>По умолчанию</h3>
+      <div class="stat"><span class="l">Валюта новых партий и платежей</span><span class="v"><select id="st-cur" class="psel">${["USD","CNY","KGS"].map(c=>`<option ${st.currency===c?"selected":""}>${c}</option>`).join("")}</select></span></div>
+      <div class="stat"><span class="l">Курс к сому (подставляется в новую партию)</span><span class="v"><input id="st-rate" class="psel" type="number" step="0.01" value="${st.rate??""}" placeholder="—" style="width:96px"></span></div>
+      <div class="stat"><span class="l wrap" style="font-size:12px;color:var(--dim)">Единицы измерения товара: шт · кор · кг · м · компл — выбираются в строке товара</span></div></div>
+    <div class="glass card spot" style="--i:1"><h3>Данные</h3>
       <div class="stat"><span class="l">Партии и товары — в Excel (CSV)</span><a class="ghost sm" href="/api/export.csv" download>Скачать</a></div>
       <div class="stat"><span class="l">Платежи — в Excel (CSV)</span><a class="ghost sm" href="/api/payments.csv" download>Скачать</a></div>
-      <div class="stat"><span class="l">Резервная копия базы</span><button class="ghost sm" id="bk">Сделать сейчас</button></div>
-      <div class="stat"><span class="l wrap" style="font-size:12px;color:var(--dim)">Копия делается сама при каждом запуске, хранится 30 последних в папке backups</span></div></div>
-    <div class="glass card spot" style="--i:1"><h3>Аккаунт</h3>
-      <div class="stat"><span class="l">Вы вошли как</span><span class="v">${esc(S.user?.name||S.user?.login||"")}</span></div>
-      <div class="stat"><span class="l">Роль</span><span class="v">${S.user?.role==="owner"?"Владелец":"Помощник"}</span></div>
-      <div class="stat"><span class="l">Версия программы</span><span class="v">${esc(S.user?.version||"")}</span></div>
-      <div class="stat"><span class="l">Выйти из программы</span><button class="ghost sm" id="out">Выйти</button></div></div>
-    <div class="glass card spot" style="--i:2"><h3>Горячие клавиши</h3><div class="keys">
-      <div class="stat"><span class="l">Новая партия / платёж / контрагент</span><span class="v"><kbd>N</kbd></span></div>
+      <div class="stat"><span class="l">Вся база одним файлом</span><a class="ghost sm" href="/api/backup.db" download>Скачать .db</a></div>
+      <div class="stat"><span class="l">Резервная копия в папку backups</span><button class="ghost sm" id="bk">Сделать сейчас</button></div>
+      <div class="stat"><span class="l wrap" style="font-size:12px;color:var(--dim)">Копия делается сама при каждом запуске, хранится 30 последних</span></div></div>
+    <div class="glass card spot" style="--i:2"><h3>Программа</h3>
+      <div class="stat"><span class="l">Версия</span><span class="v">${esc(S.user?.version||"")}</span></div>
+      <div class="stat"><span class="l">Вход</span><span class="v" style="font-weight:500;color:var(--muted)">${S.user?.auth?"по логину и паролю":"без пароля — локальная версия"}</span></div>
+      ${S.user?.auth?`<div class="stat"><span class="l">Вы вошли как ${esc(S.user?.name||S.user?.login||"")}</span><button class="ghost sm" id="out">Выйти</button></div>`:
+        `<div class="stat"><span class="l wrap" style="font-size:12px;color:var(--dim)">Программа работает только на этом компьютере, поэтому пароль не нужен. В облачной версии (этап 5) вход появится — с ролью помощника без доступа к деньгам.</span></div>`}</div>
+    <div class="glass card spot" style="--i:3"><h3>Горячие клавиши</h3><div class="keys">
+      <div class="stat"><span class="l">Новая партия / платёж / контрагент / вложение</span><span class="v"><kbd>N</kbd></span></div>
       <div class="stat"><span class="l">Поиск</span><span class="v"><kbd>/</kbd></span></div>
       <div class="stat"><span class="l">Сохранить в открытом окне</span><span class="v"><kbd>⌘</kbd><kbd>S</kbd></span></div>
       <div class="stat"><span class="l">Закрыть окно</span><span class="v"><kbd>Esc</kbd></span></div>
       <div class="stat"><span class="l">Разделы по порядку</span><span class="v"><kbd>1</kbd><kbd>2</kbd>…<kbd>6</kbd></span></div></div></div>
-    <div class="glass card spot" style="--i:3"><h3>На телефон</h3>
-      <div class="stat"><span class="l wrap">Откройте адрес программы в Safari → «Поделиться» → «На экран Домой». Откроется как приложение, без адресной строки.</span></div></div>
+    <div class="glass card spot" style="--i:4"><h3>На телефон</h3>
+      <div class="stat"><span class="l wrap">Откройте адрес программы в Safari на iPhone → «Поделиться» → «На экран Домой». Откроется как приложение со своей иконкой, без адресной строки.</span></div></div>
    </div></div>`;
+  const saveSt=async()=>{try{S.settings=await api("/api/settings",{method:"PATCH",body:{currency:$("#st-cur").value,rate:$("#st-rate").value}});toast("Настройки сохранены","ok")}catch(e){toast(e.message,"err")}};
+  $("#st-cur").onchange=saveSt;$("#st-rate").onchange=saveSt;
   $("#bk").onclick=async()=>{const b=$("#bk");b.disabled=true;try{const r=await api("/api/backup",{method:"POST"});toast("Копия сделана: "+r.file,"ok")}catch(e){toast(e.message,"err")}finally{b.disabled=false}};
-  $("#out").onclick=async()=>{await api("/api/logout",{method:"POST"});location.reload()};
+  if($("#out"))$("#out").onclick=async()=>{await api("/api/logout",{method:"POST"});location.reload()};
 }
 
 /* ═══════════════════ старт ═══════════════════ */

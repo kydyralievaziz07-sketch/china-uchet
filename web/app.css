@@ -448,6 +448,44 @@ aside{display:flex;flex-direction:column;gap:16px;animation:up .8s calc(var(--i,
 #st-pop .tag{justify-content:flex-start;padding:7px 12px}
 #st-pop .tag.cur{outline:1px solid rgba(255,255,255,.25)}
 
+/* ───────── меню действий ───────── */
+#menu-pop{position:absolute;z-index:60;display:flex;flex-direction:column;gap:2px;padding:6px;border-radius:14px;min-width:210px;
+  background:rgba(24,28,38,.97);border:1px solid var(--line);box-shadow:var(--shadow);
+  opacity:0;visibility:hidden;transform:scale(.92) translateY(-6px);transform-origin:top right;transition:.22s var(--spring),visibility 0s .22s}
+#menu-pop.show{opacity:1;visibility:visible;transform:none;transition:.22s var(--spring),visibility 0s}
+#menu-pop .mi{display:flex;align-items:center;gap:10px;border:0;background:none;color:var(--text);padding:9px 11px;border-radius:9px;font-size:13.5px;cursor:pointer;text-align:left;transition:.15s}
+#menu-pop .mi svg{width:16px;height:16px;color:var(--muted);flex:none}
+#menu-pop .mi:hover{background:rgba(108,140,255,.14)}
+#menu-pop .mi.danger{color:var(--rose)}#menu-pop .mi.danger svg{color:var(--rose)}
+#menu-pop .mi.danger:hover{background:rgba(255,123,147,.12)}
+/* ───────── фильтры, выбор периода ───────── */
+.psel{background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:10px;color:var(--text);font:inherit;font-size:13px;padding:7px 10px;outline:none}
+.rng{display:inline-flex;gap:6px}
+.rng[hidden],[hidden]{display:none!important}
+.rng input{background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:10px;color:var(--text);font:inherit;font-size:13px;padding:6px 8px;outline:none}
+/* ───────── разделение партии, списки с галочками ───────── */
+.pick{border:1px solid var(--line2);border-radius:12px;overflow:hidden;max-height:260px;overflow-y:auto}
+.pick-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line2);cursor:pointer;transition:background .2s;font-size:13.5px}
+.pick-row:last-child{border-bottom:0}
+.pick-row:hover{background:rgba(255,255,255,.04)}
+.pick-row input{accent-color:var(--indigo);width:16px;height:16px;flex:none}
+.pick-row .pk-n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick-row .pk-n small{color:var(--dim);margin-left:4px}
+.pick-row b{white-space:nowrap}
+.split-sum{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.split-sum>div{padding:11px 13px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--line2)}
+.split-sum span{display:block;font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
+.split-sum b{display:block;font-size:15px;margin-top:3px}
+.split-sum small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.seg-ctl.two .thumb{width:calc((100% - 8px)/2)}
+/* ───────── инвесторы в правой колонке ───────── */
+.inv-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line2)}
+.inv-row:last-of-type{border-bottom:0}
+.inv-t{flex:1;min-width:0}.inv-t b{display:block;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inv-t span{font-size:11.5px;color:var(--dim)}
+.inv-v{font-weight:700;white-space:nowrap}
+.pc-st .meta{font-size:11px;margin-top:2px}
+a.mini-btn{text-decoration:none}
 @keyframes up{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}
   .spark .sp-l{stroke-dashoffset:0}.spark .sp-a,.spark .sp-e,.delta{opacity:1}}
@@ -487,6 +525,11 @@ aside{display:flex;flex-direction:column;gap:16px;animation:up .8s calc(var(--i,
   .tabs::-webkit-scrollbar{display:none}
   .tab{flex:none}
   .fbar select,.fbar input{flex:1;min-width:120px}
+  .fbar .rng{width:100%}.fbar .rng input{flex:1}
+  .fbar .srch-w{width:100%}
+  .split-sum{grid-template-columns:1fr}
+  .hd-r .psel{flex:1}
+  .hd-r .rng{width:100%}
   .money{width:100%;margin:10px 0 0;text-align:left;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
   .money .m2{margin:0}
   .ship-top .acts{margin-left:auto}
