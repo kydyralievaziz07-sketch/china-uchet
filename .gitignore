@@ -6,4 +6,8 @@
 __pycache__/
 backups/
 china.db
+cloud-test.log
+export-*.db
+restore-*.db
+server.log
 web/icon.png
