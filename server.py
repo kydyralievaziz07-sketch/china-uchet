@@ -663,6 +663,7 @@ class H(BaseHTTPRequestHandler):
         # серии по месяцам (7 последних) — для мини-графиков и столбиков
         keys = month_keys(7)
         pays = [dict(r) for r in c.execute("SELECT * FROM payments")]
+        sup_ids = {s["supplier_id"] for s in live} | {y["supplier_id"] for y in pays}
         series = {"ordered": [], "paid": [], "balance": [], "sent": []}
         months = []
         for ym in keys:
@@ -670,12 +671,16 @@ class H(BaseHTTPRequestHandler):
             p = r2(sum(signed(y) for y in pays if (y["date"] or "")[:7] == ym)
                    + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] == ym))
             snt = r2(sum(s["amount"] for s in live if (s["sent_date"] or "")[:7] == ym))
-            # остаток к оплате — накопительно на конец месяца (как менялся долг), а не «за месяц»
-            cum_o = sum(s["amount"] for s in live if s["date"][:7] <= ym)
-            cum_p = (sum(signed(y) for y in pays if (y["date"] or "")[:7] <= ym)
-                     + sum(s["paid"] for s in live if s["pay_mode"] == "manual" and s["date"][:7] <= ym))
+            # остаток к оплате — накопительный долг на конец месяца, по каждому поставщику отдельно
+            # (переплата одному не гасит долг другому — так же считается плитка debt_total)
+            bal = 0.0
+            for pid in sup_ids:
+                co = sum(s["amount"] for s in live if s["supplier_id"] == pid and s["date"][:7] <= ym)
+                cp = (sum(signed(y) for y in pays if y["supplier_id"] == pid and (y["date"] or "")[:7] <= ym)
+                      + sum(s["paid"] for s in live if s["supplier_id"] == pid and s["pay_mode"] == "manual" and s["date"][:7] <= ym))
+                bal += max(0.0, co - cp)
             series["ordered"].append(o); series["paid"].append(p)
-            series["balance"].append(r2(max(0, cum_o - cum_p))); series["sent"].append(snt)
+            series["balance"].append(r2(bal)); series["sent"].append(snt)
             months.append({"ym": ym, "total": o, "paid": p})
         by_status = {st: {"count": len([s for s in rows if s["status"] == st]),
                           "amount": r2(sum(s["amount"] for s in rows if s["status"] == st))} for st in VALID_STATUS}
