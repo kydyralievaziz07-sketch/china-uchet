@@ -1,0 +1,25 @@
+# Render Blueprint — облачная версия «Китай · учёт» (бесплатный тариф).
+# Сервис создан через API, этот файл — декларация на случай пересоздания.
+# Правило: каждая новая переменная окружения в server.py сразу добавляется сюда с sync:false.
+services:
+  - type: web
+    name: china-uchet
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/ping
+    envVars:
+      - key: DATABASE_URL          # postgresql://postgres.<ref>:<пароль>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+        sync: false
+      - key: KN_PG_SCHEMA          # схема внутри общего проекта Supabase
+        value: china
+      - key: KN_AUTH               # в облаке вход по логину и паролю обязателен
+        value: "1"
+      - key: KN_ADMIN_PASSWORD     # пароль владельца (логин admin), задаётся при старте
+        sync: false
+      - key: KN_KEEPALIVE_URL      # https://china-uchet.onrender.com/api/ping — не даёт бесплатному сервису засыпать
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.4"

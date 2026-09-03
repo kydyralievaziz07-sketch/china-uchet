@@ -1,4 +1,9 @@
-china.db
-backups/
-.secret
+
+*.env
 .DS_Store
+.cloud.env
+.secret
+__pycache__/
+backups/
+china.db
+web/icon.png
