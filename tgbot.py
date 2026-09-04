@@ -399,7 +399,7 @@ HELP = ("<b>Китай · учёт — ваш помощник</b>\n\n"
         "Я сам заведу партию, товар, аванс и посчитаю долг. Могу менять и удалять любые записи, "
         "вести платежи, инвесторов, статусы, закрывать партии с прибылью.\n\n"
         "Спрашивайте что угодно: «Ченге канча карызым бар?», «итоги за август», «какие партии в пути».\n\n"
-        "Команды: /итоги · /долги · /партии · /помощь")
+        "Команды: /итоги · /долги · /партии · /отмена · /помощь")
 
 def cmd(chat, text, thread):
     t = text.lower().lstrip("/").split("@")[0]
@@ -417,6 +417,9 @@ def cmd(chat, text, thread):
         say(chat, "<b>Долги поставщикам</b>\n" + ("\n".join(
             "• %s — %s" % (p["name"], money(p["balance"], p.get("currency") or "USD")) for p in ps) or "нет долгов"),
             thread=thread); return True
+    if t.startswith(("отмен", "откат")):
+        done = undo(LAST.pop(chat, []))
+        say(chat, "↩️ Вернул как было: " + (", ".join(done) if done else "нечего отменять"), thread=thread); return True
     if t.startswith(("парти", "список")):
         rows = api("GET", "/api/shipments").get("rows", [])[:10]
         st = {"new": "новая", "shipping": "в пути", "arrived": "пришла", "cancelled": "отменена"}
