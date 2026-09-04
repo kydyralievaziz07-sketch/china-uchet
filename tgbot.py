@@ -443,8 +443,16 @@ def handle(u):
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if text.startswith("/") and cmd(chat, text, thread): return
     if not (voice or text): return
+    # В группе голосовые берём из любой темы, а текст — только из своей (или когда обратились к боту),
+    # чтобы не встревать в переписку владельца с другими помощниками.
     if msg["chat"].get("type") in ("group", "supergroup") and THREAD and str(thread or "") != THREAD:
-        return                                          # в группе слушаем только свою тему
+        me = "@" + (CFG.get("me") or "")
+        replied = ((msg.get("reply_to_message") or {}).get("from") or {}).get("is_bot")
+        if not voice:
+            if not (replied or (me != "@" and me.lower() in text.lower())): return
+            say(chat, "Я слушаю в теме «🇨🇳 Китай · учёт» — напишите там, и я всё сделаю.", reply_to=mid, thread=thread)
+            return
+    text = re.sub(r"@\w+", "", text).strip() if text else text
 
     react(chat, mid, "👀")
     typing(chat)
