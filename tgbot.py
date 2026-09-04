@@ -461,6 +461,7 @@ def handle(u):
             if not texts:
                 react(chat, mid, "😐")
                 say(chat, "Не разобрал речь — попробуйте ещё раз или напишите текстом.", thread=thread); return
+            log("голос:", " | ".join(t[:160] for t in texts))   # видно в журнале — по нему подстраиваю распознавание
             if text: texts = [t + " " + text for t in texts]
         else:
             texts = [text]
