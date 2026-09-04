@@ -671,7 +671,9 @@ def handle(u):
             f = tg("getFile", file_id=voice["file_id"]).get("result") or {}
             if not f.get("file_path"): react(chat, mid, "😐"); say(chat, "Не смог забрать голосовое, пришлите ещё раз", thread=thread); return
             audio = _req(FILE_API + f["file_path"], raw=True, timeout=120)
-            best, texts = listen(audio, os.path.basename(f["file_path"]) or "voice.ogg", hints(ctx))
+            ext = (os.path.splitext(f["file_path"])[1] or "").lower()
+            name = "voice.ogg" if ext in ("", ".oga", ".ogg") else "voice" + ext   # .oga Groq не принимает
+            best, texts = listen(audio, name, hints(ctx))
             if not texts:
                 react(chat, mid, "😐"); say(chat, "Не разобрал речь. Попробуйте ещё раз или напишите текстом.", thread=thread); return
             if text: texts = [t + " " + text for t in texts]
