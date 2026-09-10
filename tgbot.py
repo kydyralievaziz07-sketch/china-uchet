@@ -38,8 +38,10 @@ API = "https://api.telegram.org/bot%s/" % TOKEN
 FILE_API = "https://api.telegram.org/file/bot%s/" % TOKEN
 CFG = {}          # server.py кладёт сюда port, token(), web_url
 
-# Восстановление базы из файла и пользователи — только руками владельца на сайте.
-FORBIDDEN = ("/api/restore", "/api/users", "/api/password", "/api/logout", "/api/backup")
+# Помощник правит на сайте всё: партии, товары, платежи, инвесторов, магазины,
+# настройки, пользователей, резервные копии. Закрыты только два адреса, которые
+# нечем откатить: замена всей базы файлом и смена пароля владельца (потеря входа).
+FORBIDDEN = ("/api/restore", "/api/password", "/api/logout")
 
 def enabled(): return bool(TOKEN and AI_KEY)
 
@@ -100,14 +102,17 @@ def api(method, path, body=None):
         raise RuntimeError(msg)
 
 KINDS = {"shipments": "партия", "payments": "платёж", "partners": "контрагент", "stores": "магазин",
-         "investments": "вложение", "payouts": "выплата"}
+         "investments": "вложение", "payouts": "выплата", "users": "пользователь", "settings": "настройки"}
 SKIP = {"supplier_name", "supplier_city", "stores", "amount", "paid", "balance", "payments", "shares",
         "investors", "paid_by_payments", "pay_mode", "days_transit", "created_at", "updated_at",
         "shipments", "payments_list", "ship_date", "ship_amount", "store_number", "store_name"}
 
 def fetch_one(path):
     """Состояние записи до изменения — чтобы кнопка «Отменить» вернула как было."""
-    m = re.match(r"^/api/(shipments|partners|payments|investments|payouts|stores)/(\d+)$", path)
+    if path == "/api/settings":
+        try: return api("GET", path)
+        except Exception: return None
+    m = re.match(r"^/api/(shipments|partners|payments|investments|payouts|stores|users)/(\d+)$", path)
     if not m: return None
     kind, oid = m.group(1), int(m.group(2))
     try:
@@ -140,7 +145,8 @@ def data_write(method, path, body, journal):
     if any(path.startswith(x) for x in FORBIDDEN):
         return {"error": "это можно только руками на сайте"}
     method = (method or "POST").upper()
-    before = fetch_one(path) if method in ("PATCH", "DELETE") else None
+    before = fetch_one(path) if method in ("PATCH", "DELETE", "POST") and path == "/api/settings" \
+             else (fetch_one(path) if method in ("PATCH", "DELETE") else None)
     r = api(method, path, None if method == "DELETE" else (body or {}))
     base = re.sub(r"/\d+$", "", path)
     kind = KINDS.get(base.rsplit("/", 1)[-1], "запись")
@@ -150,7 +156,10 @@ def data_write(method, path, body, journal):
             journal.append({"what": "%s №%s создана" % (kind, nid),
                             "undo": ("DELETE", "%s/%s" % (base, nid), None)})
     elif method == "PATCH" and before is not None:
-        journal.append({"what": "%s №%s изменена" % (kind, path.rsplit("/", 1)[-1]), "undo": ("PATCH", path, clean(before))})
+        if path == "/api/settings":
+            journal.append({"what": "настройки изменены", "undo": ("PATCH", path, clean(before))})
+        else:
+            journal.append({"what": "%s №%s изменена" % (kind, path.rsplit("/", 1)[-1]), "undo": ("PATCH", path, clean(before))})
     elif method == "DELETE" and before is not None:
         journal.append({"what": "%s №%s удалена" % (kind, path.rsplit("/", 1)[-1]), "undo": ("POST", base, clean(before))})
     return r
@@ -289,7 +298,14 @@ SYSTEM = """Ты — помощник владельца в его програ�
 • /api/investments — вложения инвесторов: date, investor_id, shipment_id (null = общий пул), amount, currency,
   terms (share доля прибыли | fixed процент в месяц), terms_value (число процентов), end_date, note.
 • /api/payouts — выплаты инвесторам: date, investor_id, amount, currency, kind (profit доля | principal возврат).
-• /api/investors, /api/investors/{id} — расчёт долей и начислений.
+• /api/investors, /api/investors/{id} — расчёт долей и начислений. /api/investors/{id}/report — отчёт по инвестору.
+• /api/shipments/{id}/split — POST разделить партию (часть товаров вынести в отдельную).
+• /api/settings — GET посмотреть, PATCH изменить общие настройки: currency (USD|CNY|KGS) и rate (курс к сому).
+• /api/users — GET список пользователей, POST создать (login латиницей, password, name, role: owner владелец |
+  helper помощник). /api/users/{id} — PATCH сменить имя или пароль этого пользователя, DELETE удалить.
+  Помощник (helper) видит только партии, товары и магазины: без денег, платежей и инвесторов.
+• /api/backup — POST сделать резервную копию базы прямо сейчас.
+• /api/export.csv, /api/payments.csv — выгрузки в таблицу (ссылку можно дать владельцу).
 • Списки принимают фильтры: ?from=&to=&supplier=&store=&status=&q=
 
 КАК РАБОТАТЬ:
@@ -304,6 +320,11 @@ SYSTEM = """Ты — помощник владельца в его програ�
 — Прежде чем отвечать про цифры, посмотри данные через data_get, не считай по памяти.
 — Списки запрашивай с фильтрами (?supplier=&from=&status=), а не целиком: ответы обрезаются.
 — Сделал — ответь коротко: что записал, суммы, долг, срок. Разметка только <b>жирный</b> и <i>курсив</i>.
+— Ты правишь на сайте всё то же, что владелец правит руками: записи, магазины, настройки, пользователей,
+  резервные копии. Двух вещей делать нельзя: заменить всю базу файлом (/api/restore) и сменить пароль
+  владельца — про них скажи, что это только на сайте, кнопкой.
+— Прежде чем удалять несколько записей разом или менять настройки, скажи одной строкой, что именно
+  удаляешь, и сделай. Владелец всегда может вернуть кнопкой «Отменить» или командой /отмена.
 
 РЕЧЬ ВЛАДЕЛЬЦА: кыргызский, русский, смесь, иногда китайский. Могут дать две расшифровки одного
 голосового — сравни их. Whisper не знает кыргызского и коверкает слова, восстанавливай смысл:
@@ -398,6 +419,8 @@ HELP = ("<b>Китай · учёт — ваш помощник</b>\n\n"
         "аванс жүз доллар бердим, он күндөн кийин келет».\n\n"
         "Я сам заведу партию, товар, аванс и посчитаю долг. Могу менять и удалять любые записи, "
         "вести платежи, инвесторов, статусы, закрывать партии с прибылью.\n\n"
+        "Правлю на сайте всё: контрагентов, магазины, настройки (валюта и курс), пользователей, "
+        "резервные копии. Только замену всей базы файлом и пароль владельца делайте сами на сайте.\n\n"
         "Спрашивайте что угодно: «Ченге канча карызым бар?», «итоги за август», «какие партии в пути».\n\n"
         "Команды: /итоги · /долги · /партии · /отмена · /помощь")
 
