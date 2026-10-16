@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Китай · учёт — помощник в Telegram (этап 6).
+Бутики · учёт — помощник в Telegram.
 
 Владелец пишет или наговаривает голосовое обычными словами — по-кыргызски, по-русски,
 вперемешку или по-китайски. Помощник расшифровывает речь, понимает задачу и сам делает
-всё в программе: заводит партии и товары, платит поставщикам, ведёт инвесторов,
-меняет статусы, исправляет и удаляет записи, отвечает на вопросы по цифрам.
+всё в программе: заводит компании, бутики и товары, записывает депозит и платежи Санжара,
+отмечает получение товара, исправляет и удаляет записи, отвечает на вопросы по цифрам.
 
 Доступ к данным полный — через два инструмента (чтение и запись) ко всем /api/… того же
-сервера. Помощник умеет ровно то же, что владелец умеет руками на сайте, и вся проверка
-данных, перенос аванса в платежи и пересчёт долгов работают одинаково.
+сервера. Помощник умеет ровно то же, что владелец умеет руками на сайте: проверка данных
+и пересчёт остатков работают одинаково.
 
 Речь: whisper-large-v3 на Groq (бесплатно), две расшифровки сразу. Кыргызского в Whisper
 нет, поэтому смысл восстанавливает модель по справочнику имён и правилам числительных.
@@ -38,9 +38,9 @@ API = "https://api.telegram.org/bot%s/" % TOKEN
 FILE_API = "https://api.telegram.org/file/bot%s/" % TOKEN
 CFG = {}          # server.py кладёт сюда port, token(), web_url
 
-# Помощник правит на сайте всё: партии, товары, платежи, инвесторов, магазины,
-# настройки, пользователей, резервные копии. Закрыты только два адреса, которые
-# нечем откатить: замена всей базы файлом и смена пароля владельца (потеря входа).
+# Помощник правит на сайте всё: компании, бутики, товары, депозиты, платежи, получение,
+# настройки, резервные копии. Закрыты только два адреса, которые нечем откатить:
+# замена всей базы файлом и смена пароля владельца (потеря входа).
 FORBIDDEN = ("/api/restore", "/api/password", "/api/logout")
 
 def enabled(): return bool(TOKEN and AI_KEY)
@@ -101,39 +101,22 @@ def api(method, path, body=None):
         except Exception: msg = "код %d" % e.code
         raise RuntimeError(msg)
 
-KINDS = {"shipments": "партия", "payments": "платёж", "partners": "контрагент", "stores": "магазин",
-         "investments": "вложение", "payouts": "выплата", "users": "пользователь", "settings": "настройки"}
-SKIP = {"supplier_name", "supplier_city", "stores", "amount", "paid", "balance", "payments", "shares",
-        "investors", "paid_by_payments", "pay_mode", "days_transit", "created_at", "updated_at",
-        "shipments", "payments_list", "ship_date", "ship_amount", "store_number", "store_name"}
+KINDS = {"companies": "компания", "boutiques": "бутик", "items": "товар", "payments": "платёж", "settings": "настройки"}
+# вычисляемые поля карточек — их нельзя записать обратно
+SKIP = {"ok", "items_total", "total", "deposit_used", "deposit_left", "paid_own", "paid", "remaining", "overpaid",
+        "items_count", "payments_count", "qty_total", "received_total", "company_name", "company_date",
+        "boutiques", "boutiques_count", "items", "payments", "boutique", "created_at", "updated_at"}
 
 def fetch_one(path):
     """Состояние записи до изменения — чтобы кнопка «Отменить» вернула как было."""
-    if path == "/api/settings":
-        try: return api("GET", path)
-        except Exception: return None
-    m = re.match(r"^/api/(shipments|partners|payments|investments|payouts|stores|users)/(\d+)$", path)
-    if not m: return None
-    kind, oid = m.group(1), int(m.group(2))
-    try:
-        if kind in ("shipments", "partners"): return api("GET", path)
-        lst = api("GET", "/api/" + kind)
-        rows = lst.get("rows", lst) if isinstance(lst, dict) else lst
-        for r in rows:
-            if r.get("id") == oid: return r
-    except Exception:
-        return None
-    return None
-
-ITEM_SKIP = {"store_number", "store_name"}
+    if path != "/api/settings" and not re.match(r"^/api/(companies|boutiques|items|payments)/\d+$", path): return None
+    try: return api("GET", path)
+    except Exception: return None
 
 def clean(row):
     """Убираем вычисляемые поля — остаётся только то, что можно записать обратно."""
     if not isinstance(row, dict): return row
-    out = {k: v for k, v in row.items() if k not in SKIP}
-    if isinstance(row.get("items"), list):
-        out["items"] = [{k: v for k, v in i.items() if k not in ITEM_SKIP} for i in row["items"]]
-    return out
+    return {k: v for k, v in row.items() if k not in SKIP}
 
 def data_get(path):
     if not path.startswith("/api/"): path = "/api/" + path.lstrip("/")
@@ -254,81 +237,66 @@ def listen(audio, fname, hint):
 
 # ---------------------------------------------------------------- справочник для подсказок
 def context():
-    return {"partners": api("GET", "/api/partners"), "stores": api("GET", "/api/stores"),
-            "ships": api("GET", "/api/shipments").get("rows", [])}
+    return {"companies": api("GET", "/api/companies").get("rows", []),
+            "boutiques": api("GET", "/api/boutiques").get("rows", []),
+            "currency": (api("GET", "/api/settings") or {}).get("currency") or "USD"}
 
 def brief(ctx):
-    p = [{"id": x["id"], "имя": x["name"], "валюта": x.get("currency") or "USD", "город": x.get("city") or "",
-          "поставщик": bool(x.get("is_supplier")), "инвестор": bool(x.get("is_investor")),
-          "долг_ему": x.get("balance")} for x in ctx["partners"] if x.get("active", 1)]
-    s = [{"id": x["id"], "номер": x.get("number"), "название": x.get("name") or ""}
-         for x in ctx["stores"] if x.get("active", 1)]
-    sh = [{"id": x["id"], "дата": x["date"], "поставщик": x.get("supplier_name"), "сумма": x.get("amount"),
-           "валюта": x.get("currency"), "статус": x.get("status"), "долг": x.get("balance"),
-           "закрыта": bool(x.get("closed_at"))} for x in ctx["ships"][:6]]
-    return json.dumps({"контрагенты": p, "магазины": s, "последние_партии": sh}, ensure_ascii=False)
+    co = [{"id": x["id"], "название": x.get("name") or "", "дата": x["date"], "бутиков": x.get("boutiques_count"),
+           "стоимость": x.get("total"), "оплачено": x.get("paid"), "остаток": x.get("remaining")} for x in ctx["companies"]]
+    bs = [{"id": x["id"], "компания_id": x["company_id"], "город": x["city"], "бутик": x["name"],
+           "стоимость": x.get("total"), "депозит": x.get("deposit"), "депозит_использован": x.get("deposit_used"),
+           "санжар_свои": x.get("paid_own"), "остаток": x.get("remaining"), "получение": x.get("receipt_status")}
+          for x in ctx["boutiques"][-30:]]
+    return json.dumps({"валюта": ctx["currency"], "компании": co, "бутики": bs}, ensure_ascii=False)
 
 def hints(ctx):
-    names = [x["name"] for x in ctx["partners"] if x.get("active", 1)][:25]
-    st = [str(x.get("name") or x.get("number")) for x in ctx["stores"] if x.get("active", 1)][:15]
-    goods = list(dict.fromkeys([i.get("product") for x in ctx["ships"][:40]
-                                for i in (x.get("items") or []) if i.get("product")]))[:20]
-    return ("Закуп товаров из Китая. Имена: %s. Магазины: %s. Товары: %s. "
-            "Слова: аванс, карыз, калганы, доллар, юань, сом, жүз, миң, партия, доставка, Гуанчжоу, Иу, Урумчи, Шэньчжэнь."
-            % (", ".join(names), ", ".join(st), ", ".join(goods) or "чемодан, посуда, фен, пылесос"))
+    cities = list(dict.fromkeys(x["city"] for x in ctx["boutiques"]))[:12]
+    names = [x["name"] for x in ctx["boutiques"]][-20:]
+    return ("Закуп товаров у бутиков. Города: %s. Бутики: %s. "
+            "Слова: Санжар, депозит, заплатил, остаток, получил, бутик, компания, доллар, юань, сом, жүз, миң, Гуанчжоу, Иу, Урумчи."
+            % (", ".join(cities) or "Гуанчжоу, Иу", ", ".join(names) or "бутик 12"))
 
 # ---------------------------------------------------------------- помощник с полным доступом
-SYSTEM = """Ты — помощник владельца в его программе «Китай · учёт» (закупки товаров из Китая).
-Общаешься в Telegram, по-русски, коротко и по-человечески. У тебя ПОЛНЫЙ доступ к данным программы
-через инструменты data_get (читать) и data_write (создавать, изменять, удалять). Работу делаешь сам,
-не отправляй владельца «зайти на сайт» — ты и есть тот, кто это делает.
+SYSTEM = """Ты — помощник владельца в его программе учёта закупок у бутиков. Общаешься в Telegram, по-русски,
+коротко и по-человечески. У тебя ПОЛНЫЙ доступ к данным программы через инструменты data_get (читать)
+и data_write (создавать, изменять, удалять). Работу делаешь сам, не отправляй владельца «зайти на сайт».
 
-АДРЕСА ДАННЫХ:
-• /api/summary — итоги (можно ?from=ГГГГ-ММ-ДД&to=…)
-• /api/shipments — партии: GET список, POST создать. /api/shipments/{id} — GET карточка, PATCH изменить, DELETE удалить.
-  Поля: date, supplier_id, currency (USD|CNY|KGS), prepaid (аванс, пока по партии нет платежей), status
-  (new новая | shipping в пути | arrived пришла | cancelled отменена), sent_date, arrived_date, eta_date,
-  track, default_store_id, note, profit (прибыль при закрытии), closed_at, items[].
-  items: {store_id, product, qty, unit, unit_price, amount}. При PATCH товаров передавай ВЕСЬ список
-  (старые со своими id + новые), иначе непереданные строки удалятся. amount = qty × unit_price.
-• /api/payments — платежи поставщику: date, supplier_id, shipment_id (или null), amount, currency,
-  kind (prepay аванс | final доплата | refund возврат от поставщика), method, note.
-• /api/partners — поставщики и инвесторы: name, is_supplier, is_investor, city, contact, currency, note, active.
-• /api/stores — магазины: number, name, note, active.
-• /api/investments — вложения инвесторов: date, investor_id, shipment_id (null = общий пул), amount, currency,
-  terms (share доля прибыли | fixed процент в месяц), terms_value (число процентов), end_date, note.
-• /api/payouts — выплаты инвесторам: date, investor_id, amount, currency, kind (profit доля | principal возврат).
-• /api/investors, /api/investors/{id} — расчёт долей и начислений. /api/investors/{id}/report — отчёт по инвестору.
-• /api/shipments/{id}/split — POST разделить партию (часть товаров вынести в отдельную).
-• /api/settings — GET посмотреть, PATCH изменить общие настройки: currency (USD|CNY|KGS) и rate (курс к сому).
-• /api/users — GET список пользователей, POST создать (login латиницей, password, name, role: owner владелец |
-  helper помощник). /api/users/{id} — PATCH сменить имя или пароль этого пользователя, DELETE удалить.
-  Помощник (helper) видит только партии, товары и магазины: без денег, платежей и инвесторов.
-• /api/backup — POST сделать резервную копию базы прямо сейчас.
-• /api/export.csv, /api/payments.csv — выгрузки в таблицу (ссылку можно дать владельцу).
-• Списки принимают фильтры: ?from=&to=&supplier=&store=&status=&q=
+УСТРОЙСТВО УЧЁТА: Компания → Бутики → Закупка бутика (товары + финансы).
+• /api/summary — итоги по всем компаниям.
+• /api/companies — GET список, POST создать {date ГГГГ-ММ-ДД, name, note}.
+  /api/companies/{id} — GET карточка с бутиками, PATCH изменить, DELETE удалить вместе с бутиками.
+• /api/boutiques — GET список (?company=id), POST создать {company_id, city, name (номер или название), note}.
+  /api/boutiques/{id} — GET карточка: товары items[], платежи payments[] и все цифры; PATCH изменить; DELETE удалить.
+  Поля PATCH: city, name, note; total_mode (items — стоимость по товарам | manual — одной суммой) и manual_total;
+  deposit (сумма депозита), deposit_date, deposit_note; receipt_status (none не получен | partial частично | full полностью),
+  receipt_date, receipt_note, received: [{id товара, received_qty}].
+• /api/items — POST {boutique_id, product, qty, unit_price, amount, note}; /api/items/{id} — GET, PATCH, DELETE.
+  qty, unit_price, amount, note необязательны. Если есть qty и unit_price, amount считается сам.
+• /api/payments — платежи Санжара: POST {boutique_id, date, amount, source, note}; /api/payments/{id} — GET, PATCH, DELETE.
+  source: own — Санжар платит своими деньгами (по умолчанию) | deposit — оплата из депозита бутика.
+• /api/settings — GET, PATCH: currency (USD|KGS|KZT|RUB|CNY|EUR). /api/backup — POST резервная копия.
+
+ФИНАНСЫ БУТИКА считает программа, ты только записываешь операции:
+стоимость = сумма товаров (или manual_total); депозит хранится отдельно и НЕ вычитается, пока нет платежа source=deposit;
+остаток = стоимость − платежи из депозита − платежи Санжара своими деньгами; переплата показывается отдельно.
+Оплата и получение товара — разные вещи: receipt_status меняй только когда владелец говорит, что товар пришёл.
 
 КАК РАБОТАТЬ:
-— Справочник контрагентов, магазинов и последних партий дан ниже: бери id оттуда, лишний раз не запрашивай.
-— Нет нужного поставщика или магазина, но владелец НАЗВАЛ его («у Чена», «в магазин 02») — создай сам и используй.
-— Имя поставщика НЕ названо и в справочнике не угадывается — НИКОГДА не создавай заглушку вроде «Неизвестный
-  поставщик», «Поставщик 1», «Без названия». Вместо этого спроси одной строкой: «У кого купили?» — и ничего не пиши.
-— Инвестор не назван — значит деньги владельца, вся прибыль его. Никакой записи вложения тут не нужно, владельца
-  инвестором не заводи. Вложение создавай, только когда назван человек, который дал деньги.
-— «Магазин отправляет товар» — так не бывает: товар отправляет поставщик из Китая, а магазин это тот, КУДА товар
-  приедет (поле store_id у товара). Услышал такое — уточни, у кого куплено.
-— «Дал аванс» вместе с покупкой — это поле prepaid внутри партии, отдельный платёж не нужен.
-  Если по партии уже есть платежи, новые деньги проводи через /api/payments.
-— Партия не названа («партия вышла», «товар келди», «дагы төлөдүм») — бери последнюю подходящую из справочника.
+— Справочник компаний и бутиков дан ниже: бери id оттуда, лишний раз не запрашивай.
+— Бутик не назван — бери последний подходящий из справочника; если неясно, спроси одной строкой: «В какой бутик?».
+— Бутика нет, но владелец назвал его («бутик 12 в Гуанчжоу») — создай в последней компании и используй.
+  Нет ни одной компании — создай с сегодняшней датой. Город не назван — спроси, заглушек не заводи.
+— «Внёс депозит» → PATCH бутика deposit. «Заплатил», «Санжар заплатил» → POST /api/payments source=own.
+  «Оплатил из депозита», «депозитом закрыл» → source=deposit. «Товар на столько-то» без списка → total_mode manual.
+— «Товар пришёл / келди / жетти» → receipt_status full (или partial с количествами), оплату не трогай.
 — Даты ГГГГ-ММ-ДД. Не названа — сегодня. «Через 10 дней» считай сам.
-— Сумма в другой валюте — переведи по курсам ниже в валюту партии, а в note укажи исходную сумму и курс.
+— Сумма в другой валюте — переведи по курсам ниже в валюту программы, а в note укажи исходную сумму и курс.
 — Не выдумывай числа и имена. Не уверен — сделай понятную часть, а про остальное спроси одним коротким вопросом.
 — Прежде чем отвечать про цифры, посмотри данные через data_get, не считай по памяти.
-— Списки запрашивай с фильтрами (?supplier=&from=&status=), а не целиком: ответы обрезаются.
-— Сделал — ответь коротко: что записал, суммы, долг, срок. Разметка только <b>жирный</b> и <i>курсив</i>.
-— Ты правишь на сайте всё то же, что владелец правит руками: записи, магазины, настройки, пользователей,
-  резервные копии. Двух вещей делать нельзя: заменить всю базу файлом (/api/restore) и сменить пароль
-  владельца — про них скажи, что это только на сайте, кнопкой.
+— Сделал — ответь коротко: что записал, суммы, сколько осталось оплатить. Разметка только <b>жирный</b> и <i>курсив</i>.
+— Двух вещей делать нельзя: заменить всю базу файлом (/api/restore) и сменить пароль владельца — про них скажи,
+  что это только на сайте, кнопкой.
 — Прежде чем удалять несколько записей разом или менять настройки, скажи одной строкой, что именно
   удаляешь, и сделай. Владелец всегда может вернуть кнопкой «Отменить» или командой /отмена.
 
@@ -346,7 +314,7 @@ SYSTEM = """Ты — помощник владельца в его програ�
 TOOLS = [
     {"type": "function", "function": {
         "name": "data_get",
-        "description": "Прочитать данные учёта по адресу API, например /api/summary или /api/shipments/5",
+        "description": "Прочитать данные учёта по адресу API, например /api/summary или /api/boutiques/5",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "data_write",
@@ -430,16 +398,19 @@ LAST = {}        # chat_id → журнал последних изменени�
 SEEN = set()     # update_id, чтобы не выполнить одно и то же дважды
 Q = queue.Queue()
 
-HELP = ("<b>Китай · учёт — ваш помощник</b>\n\n"
+HELP = ("<b>Бутики · учёт — ваш помощник</b>\n\n"
         "Говорите или пишите обычными словами, как человеку:\n"
-        "«Гуанчжоудан Чен, биринчи магазинге фен алдым, он штук, ар бири отуз доллар, "
-        "аванс жүз доллар бердим, он күндөн кийин келет».\n\n"
-        "Я сам заведу партию, товар, аванс и посчитаю долг. Могу менять и удалять любые записи, "
-        "вести платежи, инвесторов, статусы, закрывать партии с прибылью.\n\n"
-        "Правлю на сайте всё: контрагентов, магазины, настройки (валюта и курс), пользователей, "
-        "резервные копии. Только замену всей базы файлом и пароль владельца делайте сами на сайте.\n\n"
-        "Спрашивайте что угодно: «Ченге канча карызым бар?», «итоги за август», «какие партии в пути».\n\n"
-        "Команды: /итоги · /долги · /партии · /отмена · /помощь")
+        "«Гуанчжоу, бутик 12: он сумка алдым, ар бири жыйырма беш доллар, депозит жүз, "
+        "Санжар элүү доллар төлөдү».\n\n"
+        "Я сам запишу бутик, товары, депозит и платёж и скажу, сколько осталось оплатить. "
+        "Могу менять и удалять записи, отмечать получение товара, менять валюту.\n\n"
+        "Только замену всей базы файлом и пароль владельца делайте сами на сайте.\n\n"
+        "Спрашивайте что угодно: «канча калды?», «сколько заплатил Санжар в бутике 12», «итоги».\n\n"
+        "Команды: /итоги · /долги · /бутики · /отмена · /помощь")
+
+def cur():
+    try: return (api("GET", "/api/settings") or {}).get("currency") or "USD"
+    except Exception: return "USD"
 
 def cmd(chat, text, thread):
     t = text.lower().lstrip("/").split("@")[0]
@@ -447,25 +418,28 @@ def cmd(chat, text, thread):
     if t.startswith("id"):
         say(chat, "Этот чат: <code>%s</code>\nТема: <code>%s</code>" % (chat, thread or "—"), thread=thread); return True
     if t.startswith(("итог", "сводка")):
-        s = api("GET", "/api/summary")
-        say(chat, "<b>Итоги</b>\nПартий: %s на %s\nОплачено: %s · долг: %s\nПрибыль закрытых: %s"
-            % (s.get("count"), money(s.get("amount")), money(s.get("paid")), money(s.get("debt")), money(s.get("profit"))),
-            thread=thread); return True
-    if t.startswith(("долг", "карыз")):
-        ps = [p for p in api("GET", "/api/partners") if (p.get("balance") or 0) > 0]
-        ps.sort(key=lambda p: -(p.get("balance") or 0))
-        say(chat, "<b>Долги поставщикам</b>\n" + ("\n".join(
-            "• %s — %s" % (p["name"], money(p["balance"], p.get("currency") or "USD")) for p in ps) or "нет долгов"),
+        d, c = api("GET", "/api/summary"), cur()
+        say(chat, "<b>Итоги</b>\nКомпаний: %s · бутиков: %s\nСтоимость закупок: %s\nОплачено: %s (свои %s · депозит %s)\n"
+                  "Осталось оплатить: %s%s"
+            % (d.get("companies"), d.get("boutiques"), money(d.get("total"), c), money(d.get("paid"), c),
+               money(d.get("paid_own"), c), money(d.get("deposit_used"), c), money(d.get("remaining"), c),
+               ("\nПереплата: " + money(d.get("overpaid"), c)) if d.get("overpaid") else ""), thread=thread); return True
+    if t.startswith(("долг", "карыз", "остат")):
+        bs = [b for b in api("GET", "/api/boutiques").get("rows", []) if (b.get("remaining") or 0) > 0]
+        bs.sort(key=lambda b: -(b.get("remaining") or 0)); c = cur()
+        say(chat, "<b>Осталось оплатить</b>\n" + ("\n".join(
+            "• %s · %s — %s" % (b["city"], b["name"], money(b["remaining"], c)) for b in bs) or "всё оплачено"),
             thread=thread); return True
     if t.startswith(("отмен", "откат")):
         done = undo(LAST.pop(chat, []))
         say(chat, "↩️ Вернул как было: " + (", ".join(done) if done else "нечего отменять"), thread=thread); return True
-    if t.startswith(("парти", "список")):
-        rows = api("GET", "/api/shipments").get("rows", [])[:10]
-        st = {"new": "новая", "shipping": "в пути", "arrived": "пришла", "cancelled": "отменена"}
-        say(chat, "<b>Последние партии</b>\n" + ("\n".join(
-            "• №%d %s · %s · %s · %s" % (r["id"], d_ru(r["date"]), r.get("supplier_name") or "",
-                                         money(r.get("amount"), r.get("currency")), st.get(r.get("status"), ""))
+    if t.startswith(("бутик", "парти", "список")):
+        rows = api("GET", "/api/boutiques").get("rows", [])[-10:]; c = cur()
+        st = {"none": "не получен", "partial": "получен частично", "full": "получен полностью"}
+        say(chat, "<b>Бутики</b>\n" + ("\n".join(
+            "• №%d %s · %s — %s, оплачено %s, остаток %s, %s" % (r["id"], r["city"], r["name"], money(r.get("total"), c),
+                                                                 money(r.get("paid"), c), money(r.get("remaining"), c),
+                                                                 st.get(r.get("receipt_status"), ""))
             for r in rows) or "пока пусто"), thread=thread); return True
     return False
 
@@ -493,7 +467,7 @@ def handle(u):
         replied = ((msg.get("reply_to_message") or {}).get("from") or {}).get("is_bot")
         if not voice:
             if not (replied or (me != "@" and me.lower() in text.lower())): return
-            say(chat, "Я слушаю в теме «🇨🇳 Китай · учёт» — напишите там, и я всё сделаю.", reply_to=mid, thread=thread)
+            say(chat, "Я слушаю в своей теме — напишите там, и я всё сделаю.", reply_to=mid, thread=thread)
             return
     text = re.sub(r"@\w+", "", text).strip() if text else text
 

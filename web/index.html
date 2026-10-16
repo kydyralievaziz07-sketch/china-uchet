@@ -3,51 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#06070C">
+<meta name="theme-color" content="#2F6FE3">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Китай · учёт">
-<title>Китай · учёт</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%236C8CFF'/><stop offset='1' stop-color='%233ED8D0'/></linearGradient></defs><rect width='100' height='100' rx='24' fill='url(%23g)'/><text x='50' y='68' font-size='46' text-anchor='middle' fill='%2306070C' font-family='sans-serif' font-weight='800'>КН</text></svg>">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Бутики">
+<title>Бутики · учёт закупок</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%232F6FE3'/><rect x='22' y='22' width='24' height='24' rx='5' fill='white'/><rect x='54' y='22' width='24' height='24' rx='5' fill='white'/><rect x='22' y='54' width='24' height='24' rx='5' fill='white'/><rect x='54' y='54' width='24' height='24' rx='5' fill='white'/></svg>">
 <link rel="apple-touch-icon" href="/static/icon.png">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="stylesheet" href="/static/app.css?v={{v}}">
 </head>
 <body>
-<div class="aura" id="aura"><i class="a1"></i><i class="a2"></i><i class="a3"></i></div>
-<div class="grain"></div>
 
 <div id="login-ov">
-  <div class="aura"><i class="a1"></i><i class="a2"></i><i class="a3"></i></div>
   <form class="login-card" id="login-form" autocomplete="on">
-    <div class="mark big">КН</div>
-    <h2>Китай · учёт</h2>
-    <p>Партии, авансы, поставщики, инвесторы</p>
+    <div class="logo">Б</div>
+    <h2>Бутики · учёт</h2>
+    <p>Компании → бутики → закупка и финансы</p>
     <input id="l-login" placeholder="Логин" autocomplete="username" autocapitalize="off">
     <input id="l-pass" type="password" placeholder="Пароль" autocomplete="current-password">
-    <button class="pill" id="l-btn" type="submit">Войти</button>
+    <button class="btn primary big" id="l-btn" type="submit">Войти</button>
     <div class="login-err" id="l-err"></div>
   </form>
 </div>
 
-<div class="app off" id="app">
-  <nav class="rail" id="rail">
-    <div class="mark">КН</div>
-    <i class="rail-ind" id="rail-ind"></i>
-    <a data-sec="ships"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg><span class="tip">Партии</span></a>
-    <a data-sec="payments"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2.5"/><circle cx="12" cy="12" r="2.6"/><path d="M6 12h.01M18 12h.01"/></svg><span class="tip">Платежи</span></a>
-    <a data-sec="partners"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg><span class="tip">Поставщики</span></a>
-    <a data-sec="investors"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg><span class="tip">Инвесторы</span></a>
-    <a data-sec="stores"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M4 9v11h16V9"/><path d="M3 9a3 3 0 006 0 3 3 0 006 0 3 3 0 006 0"/></svg><span class="tip">Магазины</span></a>
-    <a data-sec="summary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg><span class="tip">Сводка</span></a>
-    <div class="sp"></div>
-    <a data-sec="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2 2 2 0 11-4 0 1.7 1.7 0 00-2.9-1.2l-.1.1a2 2 0 11-2.8-2.8l.1-.1A1.7 1.7 0 003 15a2 2 0 110-4 1.7 1.7 0 001.2-2.9l-.1-.1a2 2 0 112.8-2.8l.1.1A1.7 1.7 0 009 4.6a2 2 0 114 0 1.7 1.7 0 002.9 1.2l.1-.1a2 2 0 112.8 2.8l-.1.1A1.7 1.7 0 0021 11a2 2 0 110 4z"/></svg><span class="tip">Настройки</span></a>
-  </nav>
-  <main id="main"></main>
-</div>
+<main id="main" class="off"></main>
 
-<div class="overlay" id="modal-ov"><div class="modal" id="modal"></div></div>
-<div id="st-pop"></div>
+<div class="overlay" id="modal-ov"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
 <div id="toasts"></div>
 
 <script src="/static/app.js?v={{v}}"></script>
