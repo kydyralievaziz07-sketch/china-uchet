@@ -22,13 +22,13 @@
 
 Входа нет: программа открывается по обычной ссылке, без логина, пароля и ключей.
 """
-import base64, json, os, re, shutil, sqlite3, secrets, struct, threading, time, zlib
+import base64, hashlib, json, os, re, shutil, sqlite3, secrets, struct, threading, time, zlib
 from collections import defaultdict
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.3.0"
+VERSION = "7.3.1"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -419,6 +419,7 @@ def commit(c):
     c.commit(); SNAP["dirty"] = True
 
 # ---------------------------------------------------------------- финансовая логика
+SUP_FIELDS = ("name", "name_cn", "contact", "goods", "place", "phones", "note")   # поля поставщика справочника
 RECEIPT = ("none", "partial", "full")
 TOTAL_MODES = ("items", "manual")
 
@@ -864,8 +865,6 @@ class H(BaseHTTPRequestHandler):
         self._reply_boutique(c, r["boutique_id"], {})
 
     # -- справочник: поставщики, накладные, товары с ценой прихода (юани)
-    SUP_FIELDS = ("name", "name_cn", "contact", "goods", "place", "phones", "note")
-
     def _catalog_data(self, c, supplier_id=None):
         w, a = ("WHERE supplier_id=?", (supplier_id,)) if supplier_id else ("", ())
         sups = {r["id"]: dict(r) for r in c.execute("SELECT * FROM suppliers %s ORDER BY id" % ("WHERE id=?" if supplier_id else ""), a)}
@@ -912,11 +911,11 @@ class H(BaseHTTPRequestHandler):
         if sid and not old: c.close(); return self._err(404, "Поставщик не найден")
         cur = {**(dict(old) if old else {}), **b}
         if not (cur.get("name") or "").strip(): c.close(); return self._err(400, "Укажите название поставщика")
-        vals = [(cur.get(k) or "").strip() for k in self.SUP_FIELDS]
+        vals = [(cur.get(k) or "").strip() for k in SUP_FIELDS]
         if sid:
-            c.execute("UPDATE suppliers SET %s, updated_at=? WHERE id=?" % ",".join("%s=?" % k for k in self.SUP_FIELDS), vals + [now(), sid])
+            c.execute("UPDATE suppliers SET %s, updated_at=? WHERE id=?" % ",".join("%s=?" % k for k in SUP_FIELDS), vals + [now(), sid])
         else:
-            sid = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(self.SUP_FIELDS), ",".join("?" * (len(self.SUP_FIELDS) + 2))),
+            sid = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(SUP_FIELDS), ",".join("?" * (len(SUP_FIELDS) + 2))),
                             vals + [now(), now()]).lastrowid
         commit(c); c.close(); self._send(200, {"ok": True, "id": sid})
 
@@ -963,59 +962,89 @@ class H(BaseHTTPRequestHandler):
         c.execute("DELETE FROM catalog_items WHERE id=?", (iid,)); commit(c); c.close(); self._send(200, {"ok": True})
 
     def catalog_import(self, b):
-        """Загрузка расшифрованных накладных файлом .json: {suppliers, invoices, lines}.
-        Поставщик узнаётся по названию; уже загруженная накладная пропускается — повторная загрузка ничего не задвоит."""
-        sups, invs, lines = b.get("suppliers"), b.get("invoices"), b.get("lines")
-        if not (isinstance(sups, list) and isinstance(invs, list) and isinstance(lines, list)):
-            return self._err(400, "Это не файл накладных: нужны разделы suppliers, invoices, lines")
-        c = self._db(); res = {"suppliers": 0, "invoices": 0, "items": 0, "skipped_invoices": 0}
-        try:
-            existing = {}
-            for r in c.execute("SELECT id, name, name_cn FROM suppliers"):
-                for k in (r["name_cn"], r["name"]):
-                    if k: existing.setdefault(k.strip().lower(), r["id"])
-            sid_of = {}
-            for s in sups:
-                if not isinstance(s, dict) or not (s.get("name") or "").strip(): continue
-                key = s.get("key") or s["name"]
-                found = existing.get((s.get("name_cn") or "").strip().lower()) or existing.get(s["name"].strip().lower())
-                if not found:
-                    vals = [(str(s.get(k) or "")).strip() for k in self.SUP_FIELDS]
-                    found = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(self.SUP_FIELDS), ",".join("?" * (len(self.SUP_FIELDS) + 2))),
-                                      vals + [now(), now()]).lastrowid
-                    res["suppliers"] += 1
-                sid_of[key] = found
-            inv_of, skip = {}, set()
-            for v in invs:
-                sid = sid_of.get((v or {}).get("supplier"))
-                if not sid: continue
-                number, d = str(v.get("number") or "").strip(), valid_date(v.get("date"), "дата накладной", required=False)
-                paper = num(v.get("paper_total"), "итог накладной"); dep = num(v.get("deposit"), "залог") or 0.0
-                dup = c.execute("SELECT id FROM supplier_invoices WHERE supplier_id=? AND COALESCE(number,'')=? AND COALESCE(date,'')=?",
-                                (sid, number, d or "")).fetchone()
-                if dup: skip.add((v.get("supplier"), number)); res["skipped_invoices"] += 1; continue
-                inv_of[(v.get("supplier"), number)] = c.execute(
-                    "INSERT INTO supplier_invoices(supplier_id,number,date,paper_total,deposit,note,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (sid, number, d, paper, dep, str(v.get("note") or "").strip(), now())).lastrowid
-                res["invoices"] += 1
-            for l in lines:
-                if not isinstance(l, dict): continue
-                key = (l.get("supplier"), str(l.get("invoice") or "").strip())
-                sid = sid_of.get(l.get("supplier"))
-                if not sid or key in skip: continue
-                article, name = str(l.get("article") or "").strip(), str(l.get("name") or "").strip()
-                if not (article or name): continue
-                c.execute("INSERT INTO catalog_items(supplier_id,invoice_id,article,name,what,qty,price,note,unsure,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                          (sid, inv_of.get(key), article, name or article, str(l.get("what") or "").strip(), num(l.get("qty"), "количество"),
-                           num(l.get("price"), "цена"), str(l.get("note") or "").strip(), 1 if l.get("unsure") else 0, now(), now()))
-                res["items"] += 1
-            commit(c)
-        except ValueError:
-            c.rollback(); c.close(); raise
+        """Кнопка «Загрузить накладные»: файл .json с расшифровкой."""
+        c = self._db()
+        res = import_catalog(c, b); commit(c)
         c.close(); self._send(200, {"ok": True, **res})
+
+def import_catalog(c, b):
+    """Загрузка расшифрованных накладных файлом .json: {suppliers, invoices, lines}.
+    Поставщик узнаётся по названию; уже загруженная накладная пропускается — повторная загрузка ничего не задвоит."""
+    sups, invs, lines = b.get("suppliers"), b.get("invoices"), b.get("lines")
+    if not (isinstance(sups, list) and isinstance(invs, list) and isinstance(lines, list)):
+        raise ValueError("Это не файл накладных: нужны разделы suppliers, invoices, lines")
+    res = {"suppliers": 0, "invoices": 0, "items": 0, "skipped_invoices": 0}
+    try:
+        existing = {}
+        for r in c.execute("SELECT id, name, name_cn FROM suppliers"):
+            for k in (r["name_cn"], r["name"]):
+                if k: existing.setdefault(k.strip().lower(), r["id"])
+        sid_of = {}
+        for s in sups:
+            if not isinstance(s, dict) or not (s.get("name") or "").strip(): continue
+            key = s.get("key") or s["name"]
+            found = existing.get((s.get("name_cn") or "").strip().lower()) or existing.get(s["name"].strip().lower())
+            if not found:
+                vals = [(str(s.get(k) or "")).strip() for k in SUP_FIELDS]
+                found = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(SUP_FIELDS), ",".join("?" * (len(SUP_FIELDS) + 2))),
+                                  vals + [now(), now()]).lastrowid
+                res["suppliers"] += 1
+            sid_of[key] = found
+        inv_of, skip = {}, set()
+        for v in invs:
+            sid = sid_of.get((v or {}).get("supplier"))
+            if not sid: continue
+            number, d = str(v.get("number") or "").strip(), valid_date(v.get("date"), "дата накладной", required=False)
+            paper = num(v.get("paper_total"), "итог накладной"); dep = num(v.get("deposit"), "залог") or 0.0
+            dup = c.execute("SELECT id FROM supplier_invoices WHERE supplier_id=? AND COALESCE(number,'')=? AND COALESCE(date,'')=?",
+                            (sid, number, d or "")).fetchone()
+            if dup: skip.add((v.get("supplier"), number)); res["skipped_invoices"] += 1; continue
+            inv_of[(v.get("supplier"), number)] = c.execute(
+                "INSERT INTO supplier_invoices(supplier_id,number,date,paper_total,deposit,note,created_at) VALUES(?,?,?,?,?,?,?)",
+                (sid, number, d, paper, dep, str(v.get("note") or "").strip(), now())).lastrowid
+            res["invoices"] += 1
+        for l in lines:
+            if not isinstance(l, dict): continue
+            key = (l.get("supplier"), str(l.get("invoice") or "").strip())
+            sid = sid_of.get(l.get("supplier"))
+            if not sid or key in skip: continue
+            article, name = str(l.get("article") or "").strip(), str(l.get("name") or "").strip()
+            if not (article or name): continue
+            c.execute("INSERT INTO catalog_items(supplier_id,invoice_id,article,name,what,qty,price,note,unsure,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                      (sid, inv_of.get(key), article, name or article, str(l.get("what") or "").strip(), num(l.get("qty"), "количество"),
+                       num(l.get("price"), "цена"), str(l.get("note") or "").strip(), 1 if l.get("unsure") else 0, now(), now()))
+            res["items"] += 1
+    except Exception:
+        c.rollback(); raise
+    return res
+
+
+SEED_DIR = os.path.join(ROOT, "seed")
+
+def seed_catalog():
+    """Накладные, положенные в папку seed/, загружаются при запуске — каждый файл ровно один раз.
+    Отметка о загрузке хранится в настройках по хэшу файла: если потом что-то удалить или исправить
+    в программе, перезапуск сервера это не вернёт."""
+    if not os.path.isdir(SEED_DIR): return
+    for fn in sorted(os.listdir(SEED_DIR)):
+        if not fn.endswith(".json"): continue
+        raw = open(os.path.join(SEED_DIR, fn), "rb").read()
+        mark = "seed:" + hashlib.sha256(raw).hexdigest()[:16]
+        c = db()
+        try:
+            if c.execute("SELECT 1 FROM settings WHERE key=?", (mark,)).fetchone(): continue
+            res = import_catalog(c, json.loads(raw.decode("utf-8")))
+            set_setting(c, mark, "%s %s" % (fn, now())); commit(c)
+            print("Справочник: загружен %s — поставщиков %d, накладных %d, товаров %d, уже были %d"
+                  % (fn, res["suppliers"], res["invoices"], res["items"], res["skipped_invoices"]), flush=True)
+        except Exception as e:
+            print("Справочник: не удалось загрузить %s: %s" % (fn, e), flush=True)
+        finally:
+            c.close()
 
 def main():
     init_db()
+    seed_catalog()
     b = backup_db()
     if b: print("Резервная копия:", os.path.basename(b))
     icon = os.path.join(WEB, "icon.png")
