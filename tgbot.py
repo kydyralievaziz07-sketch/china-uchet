@@ -102,7 +102,7 @@ def api(method, path, body=None):
 
 KINDS = {"companies": "компания", "boutiques": "бутик", "items": "товар", "payments": "платёж", "settings": "настройки"}
 # вычисляемые поля карточек — их нельзя записать обратно
-SKIP = {"ok", "items_total", "total", "deposit_used", "deposit_left", "paid_own", "paid", "remaining", "overpaid",
+SKIP = {"ok", "items_total", "total", "paid_own", "paid", "remaining", "overpaid",
         "items_count", "payments_count", "qty_total", "received_total", "company_name", "company_date",
         "boutiques", "boutiques_count", "items", "payments", "boutique", "created_at", "updated_at"}
 
@@ -244,8 +244,8 @@ def brief(ctx):
     co = [{"id": x["id"], "название": x.get("name") or "", "дата": x["date"], "бутиков": x.get("boutiques_count"),
            "стоимость": x.get("total"), "оплачено": x.get("paid"), "остаток": x.get("remaining")} for x in ctx["companies"]]
     bs = [{"id": x["id"], "компания_id": x["company_id"], "город": x["city"], "бутик": x["name"],
-           "стоимость": x.get("total"), "депозит": x.get("deposit"), "депозит_использован": x.get("deposit_used"),
-           "санжар_свои": x.get("paid_own"), "остаток": x.get("remaining"), "получение": x.get("receipt_status")}
+           "стоимость": x.get("total"), "депозит": x.get("deposit"),
+           "санжар_заплатил": x.get("paid_own"), "остаток": x.get("remaining"), "получение": x.get("receipt_status")}
           for x in ctx["boutiques"][-30:]]
     return json.dumps({"валюта": ctx["currency"], "компании": co, "бутики": bs}, ensure_ascii=False)
 
@@ -272,13 +272,14 @@ SYSTEM = """Ты — помощник владельца в его програ�
   receipt_date, receipt_note, received: [{id товара, received_qty}].
 • /api/items — POST {boutique_id, product, qty, unit_price, amount, note}; /api/items/{id} — GET, PATCH, DELETE.
   qty, unit_price, amount, note необязательны. Если есть qty и unit_price, amount считается сам.
-• /api/payments — платежи Санжара: POST {boutique_id, date, amount, source, note}; /api/payments/{id} — GET, PATCH, DELETE.
-  source: own — Санжар платит своими деньгами (по умолчанию) | deposit — оплата из депозита бутика.
+• /api/payments — платежи Санжара (его собственные деньги): POST {boutique_id, date, amount, note}; /api/payments/{id} — GET, PATCH, DELETE.
+  Поле source не передавай: депозит платежом не списывается.
 • /api/settings — GET, PATCH: currency (USD|KGS|KZT|RUB|CNY|EUR). /api/backup — POST резервная копия.
 
 ФИНАНСЫ БУТИКА считает программа, ты только записываешь операции:
-стоимость = сумма товаров (или manual_total); депозит хранится отдельно и НЕ вычитается, пока нет платежа source=deposit;
-остаток = стоимость − платежи из депозита − платежи Санжара своими деньгами; переплата показывается отдельно.
+стоимость = сумма товаров (или manual_total); депозит — залог / предоплата, он СРАЗУ вычитается из стоимости;
+остаток = стоимость − депозит − платежи Санжара; переплата показывается отдельно. Депозит и платежи Санжара — разные
+вещи: не записывай депозит как платёж и не дублируй его.
 Оплата и получение товара — разные вещи: receipt_status меняй только когда владелец говорит, что товар пришёл.
 
 КАК РАБОТАТЬ:
@@ -286,8 +287,8 @@ SYSTEM = """Ты — помощник владельца в его програ�
 — Бутик не назван — бери последний подходящий из справочника; если неясно, спроси одной строкой: «В какой бутик?».
 — Бутика нет, но владелец назвал его («бутик 12 в Гуанчжоу») — создай в последней компании и используй.
   Нет ни одной компании — создай с сегодняшней датой. Город не назван — спроси, заглушек не заводи.
-— «Внёс депозит» → PATCH бутика deposit. «Заплатил», «Санжар заплатил» → POST /api/payments source=own.
-  «Оплатил из депозита», «депозитом закрыл» → source=deposit. «Товар на столько-то» без списка → total_mode manual.
+— «Внёс депозит» → PATCH бутика deposit. «Заплатил», «Санжар заплатил» → POST /api/payments.
+  Залог, предоплата, «оставил в залог» — это депозит (PATCH бутика), а не платёж. «Товар на столько-то» без списка → total_mode manual.
 — «Товар пришёл / келди / жетти» → receipt_status full (или partial с количествами), оплату не трогай.
 — Даты ГГГГ-ММ-ДД. Не названа — сегодня. «Через 10 дней» считай сам.
 — Сумма в другой валюте — переведи по курсам ниже в валюту программы, а в note укажи исходную сумму и курс.
@@ -417,10 +418,10 @@ def cmd(chat, text, thread):
         say(chat, "Этот чат: <code>%s</code>\nТема: <code>%s</code>" % (chat, thread or "—"), thread=thread); return True
     if t.startswith(("итог", "сводка")):
         d, c = api("GET", "/api/summary"), cur()
-        say(chat, "<b>Итоги</b>\nКомпаний: %s · бутиков: %s\nСтоимость закупок: %s\nОплачено: %s (свои %s · депозит %s)\n"
+        say(chat, "<b>Итоги</b>\nКомпаний: %s · бутиков: %s\nСтоимость закупок: %s\nОплачено: %s (депозит %s · Санжар %s)\n"
                   "Осталось оплатить: %s%s"
             % (d.get("companies"), d.get("boutiques"), money(d.get("total"), c), money(d.get("paid"), c),
-               money(d.get("paid_own"), c), money(d.get("deposit_used"), c), money(d.get("remaining"), c),
+               money(d.get("deposit"), c), money(d.get("paid_own"), c), money(d.get("remaining"), c),
                ("\nПереплата: " + money(d.get("overpaid"), c)) if d.get("overpaid") else ""), thread=thread); return True
     if t.startswith(("долг", "карыз", "остат")):
         bs = [b for b in api("GET", "/api/boutiques").get("rows", []) if (b.get("remaining") or 0) > 0]
