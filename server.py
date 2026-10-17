@@ -8,14 +8,14 @@
   2. Одежда — мужская, женская, детская (поле category у бутика).
   3. Бутик — город, номер/название, комментарий.
   4. Закупка бутика — товары (название, количество, цена, сумма, комментарий) и финансовый блок:
-     стоимость закупки (по товарам или вручную), депозит (залог / предоплата), оплаты Санжара,
+     стоимость закупки (по товарам или вручную), депозит (залог / предоплата), оплаты Хасана,
      получение товара (не получен / частично / полностью).
 
 Финансовая логика бутика:
   стоимость     = сумма товаров, либо введённая вручную (режим выбирается явно, двойного учёта нет);
   депозит       = залог / предоплата: вычитается из стоимости сразу, отдельным платежом его вносить не нужно;
-  оплачено      = депозит + платежи Санжара (его собственные деньги);
-  остаток       = стоимость − депозит − платежи Санжара (не ниже нуля);
+  оплачено      = депозит + платежи Хасана (его собственные деньги);
+  остаток       = стоимость − депозит − платежи Хасана (не ниже нуля);
   переплата     = если оплачено больше стоимости — показывается отдельно.
 
 Стандартная библиотека Python + SQLite локально; в облаке — pg8000 и Postgres (DATABASE_URL).
@@ -29,7 +29,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.4.4"
+VERSION = "7.4.5"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS boutique_payments(
   boutique_id INTEGER NOT NULL REFERENCES boutiques(id) ON DELETE CASCADE,
   date TEXT NOT NULL,
   amount REAL NOT NULL,
-  source TEXT NOT NULL DEFAULT 'own',            -- own: деньги Санжара | deposit: из депозита
+  source TEXT NOT NULL DEFAULT 'own',            -- own: деньги Хасана | deposit: из депозита
   note TEXT, created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_bq_company ON boutiques(company_id);
@@ -852,7 +852,7 @@ class H(BaseHTTPRequestHandler):
         c.execute("DELETE FROM boutique_items WHERE id=?", (iid,))
         self._reply_boutique(c, r["boutique_id"], {})
 
-    # -- платежи Санжара (свои деньги или из депозита)
+    # -- платежи Хасана (свои деньги или из депозита)
     def payment_one(self, pid):
         c = self._db(); r = c.execute("SELECT * FROM boutique_payments WHERE id=?", (pid,)).fetchone(); c.close()
         if not r: return self._err(404, "Платёж не найден")
@@ -868,9 +868,9 @@ class H(BaseHTTPRequestHandler):
         d = valid_date(cur.get("date"), "дата платежа")
         amount = num(cur.get("amount"), "сумма платежа", allow_none=False)
         if amount <= 0: c.close(); return self._err(400, "Сумма платежа должна быть больше нуля")
-        # платёж — всегда деньги Санжара. Депозит вычитается из стоимости сам, платежом «из депозита» его не списывают
+        # платёж — всегда деньги Хасана. Депозит вычитается из стоимости сам, платежом «из депозита» его не списывают
         if b.get("source") == "deposit":
-            c.close(); return self._err(400, "Депозит вычитается из стоимости сам — платёж «из депозита» не нужен. Запишите депозит в блоке «Депозит», а здесь — только деньги Санжара.")
+            c.close(); return self._err(400, "Депозит вычитается из стоимости сам — платёж «из депозита» не нужен. Запишите депозит в блоке «Депозит», а здесь — только деньги Хасана.")
         source = "own" if (not pid or "source" in b) else (old.get("source") or "own")
         vals = (bout["id"], d, amount, source, (cur.get("note") or "").strip())
         if pid:

@@ -95,6 +95,12 @@ main.off{display:none}
 .tile b{display:block;font-size:20px;font-weight:700;margin-top:4px;letter-spacing:-.3px;overflow-wrap:anywhere}
 .tile small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
 .tile.ok b{color:var(--ok)}.tile.warn b{color:var(--warn)}.tile.bad b{color:var(--bad)}.tile.accent b{color:var(--accent)}
+/* деньги Хасана — всегда зелёные */
+.hasan-tile{background:var(--ok-soft);border-color:transparent}.tile.wide{grid-column:1/-1}
+.hasan-tile span{color:var(--ok)}.hasan-tile b{color:var(--ok)}
+.hasan{margin-top:8px;font-size:14px;font-weight:600;color:var(--ok)}
+.hasan b{font-weight:700}.hasan.none{color:var(--muted);font-weight:500}
+.hasan-sum,.fin .line b.hasan-sum{color:var(--ok)}
 
 /* ───── секции бутика ───── */
 section{margin-top:22px}
