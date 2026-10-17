@@ -14,8 +14,12 @@
 
 Речь: whisper-large-v3 на Groq (бесплатно), две расшифровки сразу. Кыргызского в Whisper
 нет, поэтому смысл восстанавливает модель по справочнику имён и правилам числительных.
+
+Поиск товара: артикул текстом («8805», «арт F8816», /найти 803) или фото этикетки — бот сам
+ищет в справочнике «Поставщики и товары» и отвечает ценой прихода, поставщиком и накладной.
+Фото читает модель со зрением на том же Groq (KN_VISION_MODELS).
 """
-import io, json, os, re, threading, time, queue, urllib.request, urllib.error
+import base64, io, json, os, re, threading, time, queue, urllib.parse, urllib.request, urllib.error
 from datetime import date, datetime, timedelta
 
 # ---------------------------------------------------------------- настройки
@@ -33,6 +37,9 @@ STT_MODEL = os.environ.get("KN_STT_MODEL") or "whisper-large-v3"
 # У бесплатного Groq лимит 8000 токенов в минуту на каждую модель. Когда упираемся в одну,
 # сразу берём вторую с таким же умением вызывать инструменты — вместо того чтобы ждать минуту.
 MODELS = [m.strip() for m in (os.environ.get("KN_AI_MODELS") or (AI_MODEL + ",qwen/qwen3.8-27b")).split(",") if m.strip()]
+# Модели со зрением — читают артикул с фото этикетки. Первая недоступна — пробуем следующую.
+VISION_MODELS = [m.strip() for m in (os.environ.get("KN_VISION_MODELS") or
+                 "meta-llama/llama-4-scout-17b-16e-instruct,meta-llama/llama-4-maverick-17b-128e-instruct").split(",") if m.strip()]
 
 API = "https://api.telegram.org/bot%s/" % TOKEN
 FILE_API = "https://api.telegram.org/file/bot%s/" % TOKEN
@@ -259,6 +266,113 @@ def hints(ctx):
             "Слова: Хасан, депозит, заплатил, остаток, получил, бутик, компания, доллар, юань, сом, жүз, миң, Гуанчжоу, Иу, Урумчи."
             % (", ".join(cities) or "Гуанчжоу, Иу", ", ".join(names) or "бутик 12"))
 
+# ---------------------------------------------------------------- поиск товара по артикулу и этикетке
+def esc(s): return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def art_norm(s): return re.sub(r"[\s\-_.]", "", str(s or "").lower())   # как поиск на сайте: дефисы и пробелы не важны
+
+def find_items(q):
+    """Товары справочника по артикулу. Есть точные совпадения — только они, иначе всё похожее."""
+    n = art_norm(q)
+    if len(n) < 2: return [], False
+    rows = api("GET", "/api/catalog?q=" + urllib.parse.quote(q.strip())).get("items", [])
+    exact = [i for i in rows if art_norm(i.get("article")) == n]
+    return (exact, True) if exact else (rows, False)
+
+def item_line(i):
+    sup = " ".join(x for x in (esc(i.get("supplier_name")), "(%s)" % esc(i["supplier_cn"]) if i.get("supplier_cn") else "") if x)
+    inv = ("накл. №%s%s" % (esc(i["invoice_number"]), " от " + d_ru(i["invoice_date"]) if i.get("invoice_date") else "")) \
+        if i.get("invoice_number") else ""
+    name = i.get("name") or ""
+    if i.get("article") and name.startswith(i["article"]): name = name[len(i["article"]):].strip()
+    what = " · ".join(x for x in (esc(i.get("article")), esc(name), esc(i.get("what"))) if x)
+    tail = " · ".join(x for x in (sup, inv, ("%g шт" % i["qty"]) if i.get("qty") is not None else "") if x)
+    return "• <b>%s</b> — %s\n   %s" % (money(i.get("price"), "CNY") if i.get("price") is not None else "цена не указана", what, tail)
+
+def found_text(q, items, exact):
+    if not items: return "Артикул <b>%s</b> в справочнике не нашёл." % esc(q)
+    head = ("<b>%s</b> — нашёл:" if exact else "<b>%s</b> — точно такого нет, похожие:") % esc(q)
+    prices = {i.get("price") for i in items}
+    more = "\n…и ещё %d" % (len(items) - 8) if len(items) > 8 else ""
+    note = "\nУ разных поставщиков разная цена." if exact and len(items) > 1 and len(prices) > 1 else ""
+    return head + "\n" + "\n".join(item_line(i) for i in items[:8]) + more + note + "\nЦены прихода — в юанях."
+
+# Артикул текстом: «8805», «F8816», «арт 803», «артикул 6101-1», «почём 8805?», «найди 8805».
+ART_ASK = re.compile(r"^(?:(найти|найди|поиск|арт(?:икул)?|почем|почём|цена|сколько стоит)\b[\s:.,№#-]*)?"
+                     r"([a-zа-я]{0,4}[\s-]?\d[\w\-./]{0,18})\s*\??$", re.I)
+
+SEARCH_WORDS = re.compile(r"поч[её]м|цен[аыу]|найд|найт|артикул|\bарт\b|что это|сколько стоит|какой товар|\?\s*$", re.I)
+
+def article_query(text):
+    """(артикул, назван_ли_явно) — если сообщение похоже на поиск артикула, иначе None."""
+    m = ART_ASK.match((text or "").strip().replace("ё", "е"))
+    if not m: return None
+    return m.group(2).strip(), bool(m.group(1))
+
+LABEL_PROMPT = (
+    "На фото этикетка, бирка, коробка или накладная с одеждой из Китая. Найди артикул товара: "
+    "код рядом с 货号, 款号, 型号, 编号, 品号, Art, Art.No, Style, Model, Item, No. "
+    "Не путай его со штрихкодом (8–13 цифр под полосками), ценой, размером и ростом (尺码, 码, 73-90, 110cm), "
+    "составом и телефоном. Если подписи нет — выпиши самый вероятный код модели. Артикулов может быть несколько. "
+    'Ответь только JSON: {"articles": ["..."], "brand": "марка, если видна", "seen": "что на фото, 3–6 слов по-русски"}')
+
+_vision = {"found": None}
+
+def more_vision_models():
+    """Groq меняет модели. Если заданные пропали — ищем в его списке другие со зрением (один раз)."""
+    if _vision["found"] is None:
+        _vision["found"] = []
+        try:
+            ids = [m.get("id") or "" for m in _req(AI_BASE + "/models", headers={"Authorization": "Bearer " + AI_KEY}, timeout=20).get("data", [])]
+            _vision["found"] = [i for i in ids if i not in VISION_MODELS and re.search(r"llama-4|vision|scout|maverick|(^|[-/])vl($|-)", i, re.I)]
+            log("модели со зрением на замену:", ", ".join(_vision["found"]) or "нет")
+        except Exception as e:
+            log("список моделей:", e)
+    return _vision["found"]
+
+def read_label(img, mime="image/jpeg"):
+    """Артикулы с фото этикетки. None — ни одна модель со зрением не ответила."""
+    url = "data:%s;base64,%s" % (mime, base64.b64encode(img).decode("ascii"))
+    body = {"temperature": 0, "max_tokens": 300, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": LABEL_PROMPT}, {"type": "image_url", "image_url": {"url": url}}]}]}
+    def models():
+        yield from VISION_MODELS
+        yield from more_vision_models()
+    for model in models():
+        try:
+            d = _req(AI_BASE + "/chat/completions", data=json.dumps({**body, "model": model}).encode("utf-8"),
+                     headers={"Authorization": "Bearer " + AI_KEY, "Content-Type": "application/json"}, timeout=90)
+            txt = (d["choices"][0]["message"].get("content") or "").strip()
+            m = re.search(r"\{.*\}", txt, re.S)
+            j = json.loads(m.group(0)) if m else {}
+            arts = []
+            for a in j.get("articles") or []:
+                a = re.sub(r"^(?:货号|款号|型号|编号|品号|art\.?\s*no\.?|art|style|model|item|no)[\s:：.#№]*", "", str(a).strip(), flags=re.I)
+                if a and art_norm(a) not in [art_norm(x) for x in arts]: arts.append(a)
+            return {"articles": arts[:5], "brand": str(j.get("brand") or "").strip(), "seen": str(j.get("seen") or "").strip()}
+        except urllib.error.HTTPError as e:
+            log("этикетка, %s: %d %s" % (model, e.code, e.read()[:200].decode("utf-8", "replace")))
+        except Exception as e:
+            log("этикетка, %s:" % model, e)
+    return None
+
+def label_reply(img, mime):
+    """Ответ на фото этикетки: что прочитал и что нашёл в справочнике."""
+    lab = read_label(img, mime)
+    if lab is None:
+        return "Не смог прочитать фото. Напишите артикул цифрами — найду.", ""
+    arts = lab["articles"]
+    seen = ", ".join(x for x in (lab["seen"], lab["brand"]) if x)
+    if not arts:
+        return "Артикула на фото не нашёл%s. Сфотографируйте этикетку ближе или напишите артикул цифрами." \
+            % ((" (вижу: %s)" % esc(seen)) if seen else ""), ""
+    head = "📷 Прочитал: <b>%s</b>%s\n\n" % (esc(", ".join(arts)), (" · " + esc(seen)) if seen else "")
+    res = [(a,) + find_items(a) for a in arts]
+    hits = [r for r in res if r[1] and r[2]] or [r for r in res if r[1]]
+    if not hits:
+        return head + "В справочнике таких артикулов нет. Если прочитал неверно — напишите артикул цифрами.", ", ".join(arts)
+    return head + "\n\n".join(found_text(*r) for r in hits[:3]), ", ".join(arts)
+
 # ---------------------------------------------------------------- помощник с полным доступом
 SYSTEM = """Ты — помощник владельца в его программе учёта закупок у бутиков. Общаешься в Telegram, по-русски,
 коротко и по-человечески. У тебя ПОЛНЫЙ доступ к данным программы через инструменты data_get (читать)
@@ -414,7 +528,9 @@ HELP = ("<b>Бутики · учёт — ваш помощник</b>\n\n"
         "Могу менять и удалять записи, отмечать получение товара, менять валюту.\n\n"
         "Только замену всей базы файлом делайте сами на сайте.\n\n"
         "Спрашивайте что угодно: «канча калды?», «сколько заплатил Хасан в бутике 12», «итоги».\n\n"
-        "Команды: /итоги · /долги · /бутики · /отмена · /помощь")
+        "🔎 <b>Найти товар:</b> пришлите фото этикетки или артикул («8805», «арт F8816») — "
+        "скажу цену прихода, поставщика и накладную.\n\n"
+        "Команды: /найти · /итоги · /долги · /бутики · /отмена · /помощь")
 
 def cur():
     try: return (api("GET", "/api/settings") or {}).get("currency") or "USD"
@@ -438,6 +554,11 @@ def cmd(chat, text, thread):
         say(chat, "<b>Осталось оплатить</b>\n" + ("\n".join(
             "• %s · %s — %s" % (b["city"], b["name"], money(b["remaining"], c)) for b in bs) or "всё оплачено"),
             thread=thread); return True
+    if t.startswith(("найти", "найди", "find", "артикул", "арт ")):
+        q = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not q:
+            say(chat, "Пришлите артикул после команды (/найти 8805) или просто фото этикетки.", thread=thread); return True
+        say(chat, found_text(q, *find_items(q)), thread=thread); return True
     if t.startswith(("отмен", "откат")):
         done = undo(LAST.pop(chat, []))
         say(chat, "↩️ Вернул как было: " + (", ".join(done) if done else "нечего отменять"), thread=thread); return True
@@ -465,9 +586,11 @@ def handle(u):
         log("чужой:", frm, who.get("username")); return
     mid = msg["message_id"]
     voice = msg.get("voice") or msg.get("audio") or msg.get("video_note")
+    doc = msg.get("document") or {}
+    photo = (msg.get("photo") or [None])[-1] or (doc if (doc.get("mime_type") or "").startswith("image/") else None)
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if text.startswith("/") and cmd(chat, text, thread): return
-    if not (voice or text): return
+    if not (voice or text or photo): return
     # В группе голосовые берём из любой темы, а текст — только из своей (или когда обратились к боту),
     # чтобы не встревать в переписку владельца с другими помощниками.
     if msg["chat"].get("type") in ("group", "supergroup") and THREAD and str(thread or "") != THREAD:
@@ -478,6 +601,10 @@ def handle(u):
             say(chat, "Я слушаю в своей теме — напишите там, и я всё сделаю.", reply_to=mid, thread=thread)
             return
     text = re.sub(r"@\w+", "", text).strip() if text else text
+
+    # Фото без подписи или с вопросом про товар — ищем артикул; с другой подписью («Хасан заплатил 500») — как раньше, по тексту.
+    if photo and (not text or article_query(text) or SEARCH_WORDS.search(text)): return handle_photo(chat, mid, thread, photo)
+    if text and not voice and find_by_text(chat, mid, thread, text): return
 
     react(chat, mid, "👀")
     typing(chat)
@@ -519,6 +646,50 @@ def handle(u):
         import traceback; traceback.print_exc()
         react(chat, mid, "😐")
         say(chat, "Не смог обработать: %s" % e, thread=thread)
+
+def remember(chat, said, reply):
+    h = HIST.setdefault(chat, [])
+    h.append({"role": "user", "content": said}); h.append({"role": "assistant", "content": (reply or "")[:1500]})
+    del h[:-6]
+
+def find_by_text(chat, mid, thread, text):
+    """Сообщение — артикул: отвечаем сразу из справочника, без модели. Голый код («5000») ищем,
+    только если бот сейчас ничего не спрашивал и такой артикул точно есть, — иначе это ответ на вопрос."""
+    aq = article_query(text)
+    if not aq: return False
+    q, asked = aq
+    last = next((m["content"] for m in reversed(HIST.get(chat, [])) if m["role"] == "assistant"), "")
+    if not asked and re.sub(r"<[^>]+>", "", last).strip().endswith("?"): return False
+    try: items, exact = find_items(q)
+    except Exception as e:
+        log("поиск артикула:", e); return False
+    if not asked and not exact: return False
+    reply = found_text(q, items, exact)
+    say(chat, reply, reply_to=mid, thread=thread)
+    react(chat, mid, "👌" if items else "🤔")
+    remember(chat, "Найди артикул " + q, reply)
+    return True
+
+def handle_photo(chat, mid, thread, photo):
+    """Фото этикетки или бирки → артикул → цена прихода из справочника."""
+    react(chat, mid, "👀"); typing(chat)
+    try:
+        if (photo.get("file_size") or 0) > 3_500_000:
+            say(chat, "Фото слишком большое — пришлите его как обычное фото, не файлом.", reply_to=mid, thread=thread)
+            react(chat, mid, "😐"); return
+        f = tg("getFile", file_id=photo["file_id"]).get("result") or {}
+        if not f.get("file_path"):
+            react(chat, mid, "😐"); say(chat, "Не смог забрать фото, пришлите ещё раз", thread=thread); return
+        img = _req(FILE_API + f["file_path"], raw=True, timeout=120)
+        ext = os.path.splitext(f["file_path"])[1].lower()
+        mime = photo.get("mime_type") or {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
+        reply, arts = label_reply(img, mime)
+        say(chat, reply, reply_to=mid, thread=thread)
+        react(chat, mid, "👌" if "нашёл:" in reply or "похожие:" in reply else "🤔")
+        remember(chat, "[фото этикетки]" + (" артикул " + arts if arts else ""), reply)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        react(chat, mid, "😐"); say(chat, "Не смог обработать фото: %s" % e, thread=thread)
 
 def handle_button(cb):
     chat = cb["message"]["chat"]["id"]
