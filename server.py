@@ -29,7 +29,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.4.2"
+VERSION = "7.4.3"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -1080,9 +1080,32 @@ def import_boutiques(c, b):
         c.rollback(); raise
     return res
 
+FIXABLE = {"boutiques": ("category", "city", "name", "manual_total", "deposit", "note"),
+           "supplier_invoices": ("number", "date", "paper_total", "deposit", "note")}
+
+def apply_fixes(c, b):
+    """Точечные исправления уже загруженного: {fixes: [{table, where, was, set}]}. Запись меняется, только если
+    под where подходит ровно одна и её поля всё ещё равны was — правки, сделанные в программе вручную, не затираются."""
+    fixes = b.get("fixes")
+    if not isinstance(fixes, list): raise ValueError("Нужен список fixes")
+    res = {"fixed": 0, "skipped": 0}
+    try:
+        for f in fixes:
+            cols = FIXABLE.get((f or {}).get("table"))
+            where, was, upd = f.get("where") or {}, f.get("was") or {}, f.get("set") or {}
+            if not cols or not where or not upd or any(k not in cols for k in list(where) + list(was) + list(upd)):
+                raise ValueError("Неверное исправление: %s" % json.dumps(f, ensure_ascii=False))
+            rows = c.execute("SELECT * FROM %s WHERE %s" % (f["table"], " AND ".join("%s=?" % k for k in where)), list(where.values())).fetchall()
+            if len(rows) != 1 or any(rows[0][k] != v for k, v in was.items()): res["skipped"] += 1; continue
+            c.execute("UPDATE %s SET %s WHERE id=?" % (f["table"], ",".join("%s=?" % k for k in upd)), list(upd.values()) + [rows[0]["id"]])
+            res["fixed"] += 1
+    except Exception:
+        c.rollback(); raise
+    return res
+
 def seed_data():
     """Файлы из папки seed/ загружаются при запуске — каждый ровно один раз: накладные в справочник
-    (suppliers/invoices/lines) или бутики без товаров (season/category/boutiques).
+    (suppliers/invoices/lines), бутики без товаров (season/category/boutiques) или исправления (fixes).
     Отметка о загрузке хранится в настройках по хэшу файла вместе с самой загрузкой: если потом
     что-то удалить или исправить в программе, перезапуск сервера это не вернёт."""
     if not os.path.isdir(SEED_DIR): return
@@ -1094,7 +1117,10 @@ def seed_data():
         try:
             if c.execute("SELECT 1 FROM settings WHERE key=?", (mark,)).fetchone(): continue
             data = json.loads(raw.decode("utf-8"))
-            if "boutiques" in data:
+            if "fixes" in data:
+                res = apply_fixes(c, data)
+                msg = "исправлено %d, пропущено %d" % (res["fixed"], res["skipped"])
+            elif "boutiques" in data:
                 res = import_boutiques(c, data)
                 msg = "бутиков %d, уже были %d%s" % (res["boutiques"], res["skipped"], ", сезон создан" if res["season_created"] else "")
             else:
