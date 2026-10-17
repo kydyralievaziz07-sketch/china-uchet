@@ -1,6 +1,6 @@
 "use strict";
 /* Бутики · учёт — интерфейс. Три экрана без перезагрузки страницы:
-   Компании → Бутики компании → Закупка и финансы бутика. Плюс маленький экран настроек. */
+   Сезоны → Одежда (мужская / женская / детская) → Бутики → Закупка и финансы. Плюс справочник товаров и настройки. */
 
 /* ───────────── утилиты ───────────── */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -81,9 +81,10 @@ const nav=h=>{if(location.hash.replace(/^#\/?/,"")===h)route();else location.has
 let routeSeq=0;
 async function route(){
   const seq=++routeSeq;
-  const [a,b]=location.hash.replace(/^#\/?/,"").split("/");
+  const [a,b,c]=location.hash.replace(/^#\/?/,"").split("/");
   try{
-    if(a==="company"&&b)await renderCompany(+b);
+    if(a==="company"&&b&&c)await renderCategory(+b,c);
+    else if(a==="company"&&b)await renderCompany(+b);
     else if(a==="boutique"&&b)await renderBoutique(+b);
     else if(a==="settings")await renderSettings();
     else if(a==="catalog")await renderCatalog();
@@ -95,65 +96,87 @@ async function route(){
 addEventListener("hashchange",route);
 async function refresh(fn){const y=scrollY;await fn();window.scrollTo(0,y)}
 
-/* ───────────── уровень 1: компании ───────────── */
-const homeTabs=a=>`<nav class="seg"><a href="#" class="${a==="co"?"on":""}">Компании</a><a href="#catalog" class="${a==="catalog"?"on":""}"><span class="full">Поставщики и товары</span><span class="short">Товары</span></a></nav>`;
-const coTitle=c=>c.name||("Компания от "+dRu(c.date));
+/* ───────────── уровень 1: сезоны (в базе — companies) ───────────── */
+const homeTabs=a=>`<nav class="seg"><a href="#" class="${a==="co"?"on":""}">Сезоны</a><a href="#catalog" class="${a==="catalog"?"on":""}"><span class="full">Поставщики и товары</span><span class="short">Товары</span></a></nav>`;
+const coTitle=c=>c.name||("Сезон от "+dRu(c.date));
+const CATS=[["men","Мужская одежда"],["women","Женская одежда"],["kids","Детская одежда"]];
+const catName=k=>(CATS.find(x=>x[0]===k)||[k,""])[1];
+const SEASONS=["Зима","Весна","Лето","Осень"];
+const numsHtml=x=>`<div class="nums"><div><span>Закупки</span><b>${money(x.total)}</b></div><div><span>Оплачено</span><b>${money(x.paid)}</b></div>
+      <div><span>Осталось</span><b class="${x.remaining>0?"warn":"ok"}">${money(x.remaining)}</b></div>
+      ${x.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(x.overpaid)}</b></div>`:""}</div>`;
+const tilesHtml=(x,count)=>`<div class="tiles">
+      <div class="card tile"><span>Бутиков</span><b>${count}</b></div>
+      <div class="card tile"><span>Закупки</span><b>${money(x.total)}</b></div>
+      <div class="card tile accent"><span>Оплачено</span><b>${money(x.paid)}</b><small>депозит ${money(x.deposit)} · Санжар ${money(x.paid_own)}</small></div>
+      <div class="card tile ${x.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(x.remaining)}</b>${x.overpaid>0?`<small>переплата ${money(x.overpaid)}</small>`:""}</div>
+    </div>`;
 async function renderCompanies(){
   const rows=(await api("/api/companies")).rows;
-  $("#main").innerHTML=`<div class="view">${bar("Компании",rows.length?cnt(rows.length,"компания","компании","компаний"):"",null,"",
+  $("#main").innerHTML=`<div class="view">${bar("Сезоны",rows.length?cnt(rows.length,"сезон","сезона","сезонов"):"",null,"",
       `<a class="ibtn" href="#settings" title="Настройки" aria-label="Настройки">${I.gear}</a>`)}
     ${homeTabs("co")}
     ${rows.length?`<div class="list">${rows.map(companyRow).join("")}</div>
-      <div class="add-row"><button class="btn primary big add-main" id="add-co">${I.plus}Создать компанию</button></div>`
-    :`<div class="empty card"><div class="big-ic">${I.box}</div><b>Компаний пока нет</b>
-      <p>Создайте первую компанию. Внутри неё будут бутики, а в каждом бутике — закупка и финансы.</p>
-      <button class="btn primary big" id="add-co">${I.plus}Создать компанию</button></div>`}</div>`;
+      <div class="add-row"><button class="btn primary big add-main" id="add-co">${I.plus}Добавить сезон</button></div>`
+    :`<div class="empty card"><div class="big-ic">${I.box}</div><b>Сезонов пока нет</b>
+      <p>Добавьте сезон — например, «Зима 2026». Внутри будут мужская, женская и детская одежда, а в них — бутики.</p>
+      <button class="btn primary big" id="add-co">${I.plus}Добавить сезон</button></div>`}</div>`;
   $("#add-co").onclick=()=>companyModal();
 }
 function companyRow(c){
   return `<a class="card row" href="#company/${c.id}"><div class="main"><div class="ttl">${esc(coTitle(c))}</div>
-    <div class="sub">создана ${dRu(c.date)} · ${cnt(c.boutiques_count,"бутик","бутика","бутиков")}</div>
-    <div class="nums"><div><span>Закупки</span><b>${money(c.total)}</b></div><div><span>Оплачено</span><b>${money(c.paid)}</b></div>
-      <div><span>Осталось оплатить</span><b class="${c.remaining>0?"warn":"ok"}">${money(c.remaining)}</b></div>
-      ${c.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(c.overpaid)}</b></div>`:""}</div></div>${I.chev}</a>`;
+    <div class="sub">${cnt(c.boutiques_count,"бутик","бутика","бутиков")}${c.note?" · "+esc(c.note):""}</div>
+    ${numsHtml(c)}</div>${I.chev}</a>`;
 }
 function companyModal(c){
-  const isNew=!c;
-  openModal(isNew?"Новая компания":"Компания",`<div class="frm">
-    ${fld("date","co-date","Дата создания",c?.date||todayISO(),{autofocus:true})}
-    ${fld("text","co-name","Название (необязательно)",c?.name,{ph:"например, Осень 2026"})}
-    ${fld("area","co-note","Комментарий (необязательно)",c?.note,{full:true})}</div>`,FOOT(isNew?"Создать":"Сохранить"));
+  const isNew=!c,year=new Date().getFullYear();
+  openModal(isNew?"Новый сезон":"Сезон",`<div class="fg full"><label>Время года</label>
+      <div class="chips">${SEASONS.map(x=>`<button type="button" class="btn" data-season="${x}">${x}</button>`).join("")}</div></div>
+    <div class="frm" style="margin-top:12px">
+    ${fld("text","co-name","Название",c?.name||"",{full:true,ph:"например, Зима "+year,autofocus:!isNew})}
+    ${fld("area","co-note","Комментарий (необязательно)",c?.note,{full:true})}</div>`,FOOT(isNew?"Добавить":"Сохранить"));
+  const mark=()=>$$("#mform [data-season]").forEach(x=>x.classList.toggle("on",v("co-name").startsWith(x.dataset.season)));
+  $$("#mform [data-season]").forEach(x=>x.onclick=()=>{$("#co-name").value=x.dataset.season+" "+year;mark()});
+  $("#co-name").oninput=mark;mark();
   onSubmit(async()=>{
-    const body={date:v("co-date"),name:v("co-name"),note:v("co-note")};
+    const body={name:v("co-name"),note:v("co-note")};
     const r=await api(isNew?"/api/companies":"/api/companies/"+c.id,{method:isNew?"POST":"PATCH",body});
-    closeModal();toast(isNew?"Компания создана":"Сохранено","ok");
+    closeModal();toast(isNew?"Сезон добавлен":"Сохранено","ok");
     isNew?nav("company/"+r.id):route();
   });
 }
 
-/* ───────────── уровень 2: бутики компании ───────────── */
-const bTitle=b=>b.city+" · "+b.name;
+/* ───────────── уровень 2: одежда внутри сезона ───────────── */
 async function renderCompany(id){
   const c=await api("/api/companies/"+id),bs=c.boutiques;
-  $("#main").innerHTML=`<div class="view">${bar(coTitle(c),"создана "+dRu(c.date)+(c.note?" · "+c.note:""),"","Компании",
-      `<button class="ibtn" id="co-edit" title="Изменить компанию">${I.edit}</button><button class="ibtn danger" id="co-del" title="Удалить компанию">${I.trash}</button>`)}
-    <div class="tiles">
-      <div class="card tile"><span>Бутиков</span><b>${bs.length}</b></div>
-      <div class="card tile"><span>Закупки</span><b>${money(c.total)}</b></div>
-      <div class="card tile accent"><span>Оплачено</span><b>${money(c.paid)}</b><small>депозит ${money(c.deposit)} · Санжар ${money(c.paid_own)}</small></div>
-      <div class="card tile ${c.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(c.remaining)}</b>${c.overpaid>0?`<small>переплата ${money(c.overpaid)}</small>`:""}</div>
-    </div>
+  $("#main").innerHTML=`<div class="view">${bar(coTitle(c),c.note||"","","Сезоны",
+      `<button class="ibtn" id="co-edit" title="Изменить сезон">${I.edit}</button><button class="ibtn danger" id="co-del" title="Удалить сезон">${I.trash}</button>`)}
+    ${tilesHtml(c,bs.length)}
+    <div class="list">${c.categories.map(k=>`<a class="card row" href="#company/${c.id}/${k.key}"><div class="main">
+      <div class="ttl">${esc(k.name)}</div>
+      <div class="sub">${k.boutiques_count?cnt(k.boutiques_count,"бутик","бутика","бутиков"):"бутиков пока нет"}</div>
+      ${k.boutiques_count?numsHtml(k):""}</div>${I.chev}</a>`).join("")}</div></div>`;
+  $("#co-edit").onclick=()=>companyModal(c);
+  $("#co-del").onclick=async()=>{
+    const inside=bs.length?` Вместе с ним удалятся ${cnt(bs.length,"бутик","бутика","бутиков")}, их товары и платежи.`:"";
+    if(!await confirmBox("Удалить сезон?",`«${coTitle(c)}» будет удалён.${inside} Отменить это нельзя.`))return;
+    try{await api("/api/companies/"+c.id,{method:"DELETE"});toast("Сезон удалён","ok");nav("")}catch(e){toast(e.message,"err")}};
+}
+
+/* ───────────── уровень 3: бутики одного вида одежды ───────────── */
+const bTitle=b=>b.city+" · "+b.name;
+async function renderCategory(id,cat){
+  const c=await api("/api/companies/"+id),k=c.categories.find(x=>x.key===cat);
+  if(!k)throw new Error("Такого раздела нет");
+  const bs=c.boutiques.filter(b=>b.category===cat);
+  $("#main").innerHTML=`<div class="view">${bar(k.name,coTitle(c),"company/"+c.id,coTitle(c),"")}
+    ${tilesHtml(k,bs.length)}
     ${bs.length?`<div class="list">${bs.map(boutRow).join("")}</div>
       <div class="add-row"><button class="btn primary big add-main" id="add-b">${I.plus}Добавить бутик</button></div>`
     :`<div class="empty card"><div class="big-ic">${I.shop}</div><b>Бутиков пока нет</b>
       <p>Добавьте бутик: город, номер или название. Внутри будут товары, депозит и платежи.</p>
       <button class="btn primary big" id="add-b">${I.plus}Добавить бутик</button></div>`}</div>`;
-  $("#add-b").onclick=()=>boutiqueModal(c.id);
-  $("#co-edit").onclick=()=>companyModal(c);
-  $("#co-del").onclick=async()=>{
-    const inside=bs.length?` Вместе с ней удалятся ${cnt(bs.length,"бутик","бутика","бутиков")}, их товары и платежи.`:"";
-    if(!await confirmBox("Удалить компанию?",`«${coTitle(c)}» будет удалена.${inside} Отменить это нельзя.`))return;
-    try{await api("/api/companies/"+c.id,{method:"DELETE"});toast("Компания удалена","ok");nav("")}catch(e){toast(e.message,"err")}};
+  $("#add-b").onclick=()=>boutiqueModal(c.id,null,cat);
 }
 function boutRow(b){
   return `<a class="card row" href="#boutique/${b.id}"><div class="main"><div class="ttl">${esc(bTitle(b))}</div>
@@ -162,14 +185,15 @@ function boutRow(b){
       <div><span>Осталось</span><b class="${b.remaining>0?"warn":"ok"}">${money(b.remaining)}</b></div>
       ${b.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(b.overpaid)}</b></div>`:""}</div></div>${I.chev}</a>`;
 }
-function boutiqueModal(companyId,b){
-  const isNew=!b;
+function boutiqueModal(companyId,b,cat){
+  const isNew=!b,cur=b?.category||cat||"men";
   openModal(isNew?"Новый бутик":"Бутик",`<div class="frm">
     ${fld("text","b-city","Город",b?.city,{ph:"Гуанчжоу",autofocus:true})}
     ${fld("text","b-name","Номер или название бутика",b?.name,{ph:"№12"})}
+    <div class="fg full"><label for="b-cat">Одежда</label><select id="b-cat">${CATS.map(([k,n])=>`<option value="${k}" ${k===cur?"selected":""}>${n}</option>`).join("")}</select></div>
     ${fld("area","b-note","Комментарий (необязательно)",b?.note,{full:true,ph:"этаж, ряд, контакт…"})}</div>`,FOOT(isNew?"Добавить":"Сохранить"));
   onSubmit(async()=>{
-    const body={city:v("b-city"),name:v("b-name"),note:v("b-note")};if(isNew)body.company_id=companyId;
+    const body={city:v("b-city"),name:v("b-name"),note:v("b-note"),category:$("#b-cat").value};if(isNew)body.company_id=companyId;
     const r=await api(isNew?"/api/boutiques":"/api/boutiques/"+b.id,{method:isNew?"POST":"PATCH",body});
     closeModal();toast(isNew?"Бутик добавлен":"Сохранено","ok");
     isNew?nav("boutique/"+r.id):route();
@@ -181,7 +205,7 @@ async function renderBoutique(id){
   const b=await api("/api/boutiques/"+id),items=b.items,pays=b.payments;
   const sym=SYM[S.settings.currency]||S.settings.currency;
   const noAmount=items.filter(i=>i.amount==null).length;
-  $("#main").innerHTML=`<div class="view">${bar(bTitle(b),b.note||"","company/"+b.company_id,b.company_name||"Компания",
+  $("#main").innerHTML=`<div class="view">${bar(bTitle(b),[b.company_name,b.note].filter(Boolean).join(" · "),"company/"+b.company_id+"/"+b.category,b.category_name||"Назад",
       `<button class="ibtn" id="b-edit" title="Изменить бутик">${I.edit}</button><button class="ibtn danger" id="b-del" title="Удалить бутик">${I.trash}</button>`)}
 
     <section>
@@ -229,7 +253,7 @@ async function renderBoutique(id){
   $("#b-edit").onclick=()=>boutiqueModal(b.company_id,b);
   $("#b-del").onclick=async()=>{
     if(!await confirmBox("Удалить бутик?",`«${bTitle(b)}» будет удалён вместе с товарами, депозитом и платежами. Отменить это нельзя.`))return;
-    try{await api("/api/boutiques/"+b.id,{method:"DELETE"});toast("Бутик удалён","ok");nav("company/"+b.company_id)}catch(e){toast(e.message,"err")}};
+    try{await api("/api/boutiques/"+b.id,{method:"DELETE"});toast("Бутик удалён","ok");nav("company/"+b.company_id+"/"+b.category)}catch(e){toast(e.message,"err")}};
   $$("#add-item,#add-item2").forEach(x=>x.onclick=()=>itemModal(b,null,again));
   $$("[data-ie]").forEach(x=>x.onclick=()=>itemModal(b,items.find(i=>i.id===+x.dataset.ie),again));
   $$("[data-id]").forEach(x=>x.onclick=async()=>{const i=items.find(i=>i.id===+x.dataset.id);
@@ -471,21 +495,21 @@ function citemModal(s,i,after){
 /* ───────────── настройки ───────────── */
 async function renderSettings(){
   const u=S.info;S.settings=await api("/api/settings");
-  $("#main").innerHTML=`<div class="view">${bar("Настройки","","","Компании","")}
+  $("#main").innerHTML=`<div class="view">${bar("Настройки","","","Сезоны","")}
     <div class="card fin"><div class="fin-h"><h3>Валюта</h3><select id="st-cur" style="height:40px;border:1px solid var(--line);border-radius:10px;padding:0 10px;background:var(--bg)">
       ${Object.keys(SYM).map(c=>`<option ${S.settings.currency===c?"selected":""}>${c}</option>`).join("")}</select></div>
       <div class="hint" style="margin-top:6px">Все суммы показываются в этой валюте.</div></div>
     <div class="card fin"><div class="fin-h"><h3>Данные</h3></div><div class="stat-list">
       <div class="item"><div class="main"><div class="ttl">Вся база одним файлом</div><div class="sub">можно сохранить как копию или перенести на другой компьютер / в облако</div></div><a class="btn sm" href="/api/backup.db" download>Скачать .db</a></div>
-      <div class="item"><div class="main"><div class="ttl">Загрузить базу из файла .db</div><div class="sub">заменит все компании, бутики, товары и платежи данными из файла</div></div><button class="btn sm" id="rs-btn">Выбрать файл</button><input type="file" id="rs-file" accept=".db" hidden></div>
+      <div class="item"><div class="main"><div class="ttl">Загрузить базу из файла .db</div><div class="sub">заменит все сезоны, бутики, товары и платежи данными из файла</div></div><button class="btn sm" id="rs-btn">Выбрать файл</button><input type="file" id="rs-file" accept=".db" hidden></div>
       ${u?.cloud?"":`<div class="item"><div class="main"><div class="ttl">Резервная копия в папку backups</div><div class="sub">делается сама при каждом запуске, хранятся 30 последних</div></div><button class="btn sm" id="bk">Сделать сейчас</button></div>`}
     </div></div>
     <div class="card fin"><div class="fin-h"><h3>Программа</h3></div>
-      <div class="hint">Версия ${esc(u?.version||"")} · ${u?.cloud?"облако":"этот компьютер"}. Структура: Компании → Бутики → Закупка и финансы. Программа открывается по обычной ссылке, без входа.</div></div></div>`;
+      <div class="hint">Версия ${esc(u?.version||"")} · ${u?.cloud?"облако":"этот компьютер"}. Структура: Сезоны → Одежда → Бутики → Закупка и финансы. Программа открывается по обычной ссылке, без входа.</div></div></div>`;
   $("#st-cur").onchange=async()=>{try{S.settings=await api("/api/settings",{method:"PATCH",body:{currency:$("#st-cur").value}});toast("Валюта сохранена","ok")}catch(e){toast(e.message,"err")}};
   $("#rs-btn").onclick=()=>$("#rs-file").click();
   $("#rs-file").onchange=async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;
-    if(!await confirmBox("Загрузить базу из файла?",`${f.name}, ${Math.round(f.size/1024)} КБ. Все компании, бутики, товары и платежи будут заменены данными из файла.`,"Загрузить"))return;
+    if(!await confirmBox("Загрузить базу из файла?",`${f.name}, ${Math.round(f.size/1024)} КБ. Все сезоны, бутики, товары и платежи будут заменены данными из файла.`,"Загрузить"))return;
     const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(f)});
     try{const r=await api("/api/restore",{method:"POST",body:{db_b64:b64}});const c=r.counts||{};
       toast(`База загружена: компаний ${c.companies||0}, бутиков ${c.boutiques||0}, платежей ${c.boutique_payments||0}`,"ok");setTimeout(()=>location.reload(),1500)}

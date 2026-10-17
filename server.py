@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Учёт закупок у бутиков — простая программа: Компании → Бутики → Закупка и финансы.
+Учёт закупок у бутиков — простая программа: Сезон → Одежда → Бутики → Закупка и финансы.
 
-Три уровня:
-  1. Компания — дата создания, сколько бутиков, стоимость закупок, оплачено, остаток.
-  2. Бутик — город, номер/название, комментарий.
-  3. Закупка бутика — товары (название, количество, цена, сумма, комментарий) и финансовый блок:
+Уровни:
+  1. Сезон (Зима, Лето…; в базе — таблица companies) — сколько бутиков, стоимость закупок, оплачено, остаток.
+  2. Одежда — мужская, женская, детская (поле category у бутика).
+  3. Бутик — город, номер/название, комментарий.
+  4. Закупка бутика — товары (название, количество, цена, сумма, комментарий) и финансовый блок:
      стоимость закупки (по товарам или вручную), депозит (залог / предоплата), оплаты Санжара,
      получение товара (не получен / частично / полностью).
 
@@ -28,7 +29,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.3.1"
+VERSION = "7.4.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -87,7 +88,8 @@ CREATE TABLE IF NOT EXISTS companies(
 );
 CREATE TABLE IF NOT EXISTS boutiques(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,   -- сезон (Зима, Лето…)
+  category TEXT NOT NULL DEFAULT 'men',          -- men | women | kids: мужская / женская / детская одежда
   city TEXT NOT NULL,
   name TEXT NOT NULL,                            -- номер или название бутика
   note TEXT,
@@ -146,7 +148,7 @@ PG_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, date TEXT NOT NULL, name TEXT, note TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS boutiques(id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  city TEXT NOT NULL, name TEXT NOT NULL, note TEXT, total_mode TEXT NOT NULL DEFAULT 'items', manual_total DOUBLE PRECISION,
+  category TEXT NOT NULL DEFAULT 'men', city TEXT NOT NULL, name TEXT NOT NULL, note TEXT, total_mode TEXT NOT NULL DEFAULT 'items', manual_total DOUBLE PRECISION,
   deposit DOUBLE PRECISION NOT NULL DEFAULT 0, deposit_date TEXT, deposit_note TEXT,
   receipt_status TEXT NOT NULL DEFAULT 'none', receipt_date TEXT, receipt_note TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS boutique_items(id SERIAL PRIMARY KEY, boutique_id INTEGER NOT NULL REFERENCES boutiques(id) ON DELETE CASCADE,
@@ -157,6 +159,7 @@ CREATE TABLE IF NOT EXISTS boutique_payments(id SERIAL PRIMARY KEY, boutique_id 
 CREATE INDEX IF NOT EXISTS idx_bq_company ON boutiques(company_id);
 CREATE INDEX IF NOT EXISTS idx_bi_boutique ON boutique_items(boutique_id);
 CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id);
+ALTER TABLE boutiques ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'men';
 CREATE TABLE IF NOT EXISTS suppliers(id SERIAL PRIMARY KEY, name TEXT NOT NULL, name_cn TEXT, contact TEXT, goods TEXT, place TEXT,
   phones TEXT, note TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS supplier_invoices(id SERIAL PRIMARY KEY, supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
@@ -261,6 +264,9 @@ def migrate_sqlite(c):
     for t, col in (("payments", "created_at"), ("investments", "end_date"), ("investments", "created_at"),
                    ("investor_payouts", "created_at")):
         if cols(t) and col not in cols(t): c.execute("ALTER TABLE %s ADD COLUMN %s TEXT" % (t, col))
+    # v7.4: у бутика появился вид одежды; всё, что заведено раньше, — мужская одежда
+    if cols("boutiques") and "category" not in cols("boutiques"):
+        c.execute("ALTER TABLE boutiques ADD COLUMN category TEXT NOT NULL DEFAULT 'men'")
 
 def init_db():
     c = db()
@@ -421,6 +427,7 @@ def commit(c):
 # ---------------------------------------------------------------- финансовая логика
 SUP_FIELDS = ("name", "name_cn", "contact", "goods", "place", "phones", "note")   # поля поставщика справочника
 RECEIPT = ("none", "partial", "full")
+CATEGORIES = {"men": "Мужская одежда", "women": "Женская одежда", "kids": "Детская одежда"}   # порядок = порядок на экране
 TOTAL_MODES = ("items", "manual")
 
 def finance(b, items, pays):
@@ -447,6 +454,7 @@ def pack_boutique(sn, b, full=False):
     d = {**b, **finance(b, items, pays)}
     co = sn.companies.get(b["company_id"]) or {}
     d["company_name"] = co.get("name") or ""; d["company_date"] = co.get("date")
+    d["category"] = d.get("category") or "men"; d["category_name"] = CATEGORIES.get(d["category"], "")
     if full:
         d["items"] = [dict(i) for i in items]
         d["payments"] = sorted((dict(p) for p in pays), key=lambda p: (p["date"], p["id"]), reverse=True)
@@ -460,7 +468,15 @@ def pack_company(sn, co, with_boutiques=False):
              paid_own=r2(sum(b["paid_own"] for b in bouts)), deposit=r2(sum(b["deposit"] for b in bouts)),
              remaining=r2(sum(b["remaining"] for b in bouts)), overpaid=r2(sum(b["overpaid"] for b in bouts)),
              items_count=sum(b["items_count"] for b in bouts))
-    if with_boutiques: d["boutiques"] = sorted(bouts, key=lambda b: ((b["city"] or "").lower(), (b["name"] or "").lower(), b["id"]))
+    if with_boutiques:
+        d["boutiques"] = sorted(bouts, key=lambda b: ((b["city"] or "").lower(), (b["name"] or "").lower(), b["id"]))
+        d["categories"] = []
+        for k, title in CATEGORIES.items():
+            mine = [b for b in bouts if b["category"] == k]
+            d["categories"].append({"key": k, "name": title, "boutiques_count": len(mine),
+                                    "total": r2(sum(b["total"] for b in mine)), "paid": r2(sum(b["paid"] for b in mine)),
+                                    "paid_own": r2(sum(b["paid_own"] for b in mine)), "deposit": r2(sum(b["deposit"] for b in mine)),
+                                    "remaining": r2(sum(b["remaining"] for b in mine)), "overpaid": r2(sum(b["overpaid"] for b in mine))})
     return d
 
 def num(v, name, allow_none=True):
@@ -659,13 +675,15 @@ class H(BaseHTTPRequestHandler):
 
     def company_one(self, cid):
         c = self._db(); sn = get_snap(c); co = sn.companies.get(cid)
-        if not co: c.close(); return self._err(404, "Компания не найдена")
+        if not co: c.close(); return self._err(404, "Сезон не найден")
         out = pack_company(sn, co, with_boutiques=True); c.close(); self._send(200, out)
 
     def company_save(self, b, cid=None):
         c = self._db()
         if cid and not c.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone():
-            c.close(); return self._err(404, "Компания не найдена")
+            c.close(); return self._err(404, "Сезон не найден")
+        if ("name" in b or not cid) and not (b.get("name") or "").strip():
+            c.close(); return self._err(400, "Укажите время года, например «Зима 2026»")
         if cid:
             sets, args = [], []
             if "date" in b: sets.append("date=?"); args.append(valid_date(b.get("date"), "дата создания"))
@@ -675,7 +693,7 @@ class H(BaseHTTPRequestHandler):
             c.execute("UPDATE companies SET %s WHERE id=?" % ",".join(sets), args)
         else:
             cid = c.execute("INSERT INTO companies(date,name,note,created_at,updated_at) VALUES(?,?,?,?,?)",
-                            (valid_date(b.get("date"), "дата создания"), (b.get("name") or "").strip(),
+                            (valid_date(b.get("date") or today(), "дата создания"), (b.get("name") or "").strip(),
                              (b.get("note") or "").strip(), now(), now())).lastrowid
         commit(c); sn = get_snap(c)
         out = pack_company(sn, sn.companies[cid], with_boutiques=True); c.close()
@@ -683,7 +701,7 @@ class H(BaseHTTPRequestHandler):
 
     def company_delete(self, cid):
         c = self._db()
-        if not c.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone(): c.close(); return self._err(404, "Компания не найдена")
+        if not c.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone(): c.close(); return self._err(404, "Сезон не найден")
         bids = [r["id"] for r in c.execute("SELECT id FROM boutiques WHERE company_id=?", (cid,))]
         for bid in bids:
             c.execute("DELETE FROM boutique_payments WHERE boutique_id=?", (bid,))
@@ -694,8 +712,9 @@ class H(BaseHTTPRequestHandler):
 
     # -- бутики
     def boutiques_list(self, q):
-        c = self._db(); sn = get_snap(c); cid = (q.get("company") or [""])[0]
-        rows = [pack_boutique(sn, b) for b in sn.bouts.values() if not cid or str(b["company_id"]) == str(cid)]
+        c = self._db(); sn = get_snap(c); cid = (q.get("company") or [""])[0]; cat = (q.get("category") or [""])[0]
+        rows = [pack_boutique(sn, b) for b in sn.bouts.values() if (not cid or str(b["company_id"]) == str(cid))
+                and (not cat or (b.get("category") or "men") == cat)]
         c.close(); self._send(200, {"rows": rows})
 
     def boutique_one(self, bid):
@@ -713,8 +732,12 @@ class H(BaseHTTPRequestHandler):
         if not bid or "company_id" in b:
             try: cid = int(b.get("company_id") or 0)
             except Exception: cid = 0
-            if not c.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone(): c.close(); return self._err(400, "Компания не найдена")
+            if not c.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone(): c.close(); return self._err(400, "Сезон не найден")
             vals["company_id"] = cid
+        if not bid or "category" in b:
+            cat = b.get("category") or "men"
+            if cat not in CATEGORIES: c.close(); return self._err(400, "Неверный вид одежды: нужен men, women или kids")
+            vals["category"] = cat
         if not bid or "city" in b: vals["city"] = (b.get("city") or "").strip()
         if not bid or "name" in b: vals["name"] = (b.get("name") or "").strip()
         if not bid or "note" in b: vals["note"] = (b.get("note") or "").strip()

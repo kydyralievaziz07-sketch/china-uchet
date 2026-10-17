@@ -141,6 +141,8 @@ a.back{text-decoration:none}
 .search input{width:100%;height:52px;border:1px solid var(--line);border-radius:14px;padding:0 16px;font-size:17px;background:var(--card);color:var(--text);outline:none}
 .search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .add-row.two{display:flex;gap:10px;flex-wrap:wrap}
+.chips{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.chips .btn.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .row .ttl .cn{font-weight:500;color:var(--muted);font-size:15px}
 .item .art{font-weight:700;letter-spacing:.2px}
 .item .sub a{color:var(--accent);text-decoration:none}
@@ -211,6 +213,7 @@ a.back{text-decoration:none}
   .btn.add-main{width:100%}
   .add-row.two .btn{flex:1}
   .seg .full{display:none}
+  .chips{grid-template-columns:1fr 1fr}
   .seg .short{display:inline}
   .row{padding:13px 14px}
   .nums{gap:12px}
