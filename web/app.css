@@ -130,6 +130,29 @@ section{margin-top:22px}
 .stat-list .item{padding-left:0;padding-right:0}
 .stat-list .item .ttl{font-weight:500}
 
+/* ───── вкладки главной и справочник товаров ───── */
+.seg{display:flex;gap:4px;padding:4px;border-radius:14px;background:var(--line2);margin:0 0 16px}
+.seg a{flex:1;text-align:center;padding:10px 8px;border-radius:11px;font-weight:600;font-size:15px;color:var(--muted);text-decoration:none}
+.seg a.on{background:var(--card);color:var(--text);box-shadow:var(--shadow)}
+.seg .short{display:none}
+a.row{color:var(--text);text-decoration:none}
+a.back{text-decoration:none}
+.search{margin-bottom:14px}
+.search input{width:100%;height:52px;border:1px solid var(--line);border-radius:14px;padding:0 16px;font-size:17px;background:var(--card);color:var(--text);outline:none}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.add-row.two{display:flex;gap:10px;flex-wrap:wrap}
+.row .ttl .cn{font-weight:500;color:var(--muted);font-size:15px}
+.item .art{font-weight:700;letter-spacing:.2px}
+.item .sub a{color:var(--accent);text-decoration:none}
+.item .price{font-size:17px;font-weight:700}
+.chip.unsure{background:var(--warn-soft);color:var(--warn)}
+.inv-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--line2)}
+.inv-h b{font-size:16px}
+.inv-h .sum{margin-left:auto;font-weight:700}
+.kv .item .sub{margin:0 0 2px}
+.kv .item .ttl{font-weight:500}
+.kv .item a{color:var(--accent)}
+
 /* ───── окна ───── */
 .overlay{position:fixed;inset:0;z-index:50;background:rgba(16,19,30,.45);display:flex;align-items:flex-start;justify-content:center;
   padding:40px 14px;overflow-y:auto;opacity:0;visibility:hidden;transition:opacity .18s,visibility 0s .2s}
@@ -186,6 +209,9 @@ section{margin-top:22px}
   .overlay{padding:12px 10px 24px}
   .mf .btn{flex:1;min-width:0}
   .btn.add-main{width:100%}
+  .add-row.two .btn{flex:1}
+  .seg .full{display:none}
+  .seg .short{display:inline}
   .row{padding:13px 14px}
   .nums{gap:12px}
   .item .amt{font-size:15px}

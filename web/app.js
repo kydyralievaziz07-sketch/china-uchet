@@ -86,6 +86,8 @@ async function route(){
     if(a==="company"&&b)await renderCompany(+b);
     else if(a==="boutique"&&b)await renderBoutique(+b);
     else if(a==="settings")await renderSettings();
+    else if(a==="catalog")await renderCatalog();
+    else if(a==="supplier"&&b)await renderSupplier(+b);
     else await renderCompanies();
     if(seq===routeSeq)window.scrollTo(0,0);
   }catch(e){toast(e.message,"err");if(a)nav("")}
@@ -94,11 +96,13 @@ addEventListener("hashchange",route);
 async function refresh(fn){const y=scrollY;await fn();window.scrollTo(0,y)}
 
 /* ───────────── уровень 1: компании ───────────── */
+const homeTabs=a=>`<nav class="seg"><a href="#" class="${a==="co"?"on":""}">Компании</a><a href="#catalog" class="${a==="catalog"?"on":""}"><span class="full">Поставщики и товары</span><span class="short">Товары</span></a></nav>`;
 const coTitle=c=>c.name||("Компания от "+dRu(c.date));
 async function renderCompanies(){
   const rows=(await api("/api/companies")).rows;
   $("#main").innerHTML=`<div class="view">${bar("Компании",rows.length?cnt(rows.length,"компания","компании","компаний"):"",null,"",
       `<a class="ibtn" href="#settings" title="Настройки" aria-label="Настройки">${I.gear}</a>`)}
+    ${homeTabs("co")}
     ${rows.length?`<div class="list">${rows.map(companyRow).join("")}</div>
       <div class="add-row"><button class="btn primary big add-main" id="add-co">${I.plus}Создать компанию</button></div>`
     :`<div class="empty card"><div class="big-ic">${I.box}</div><b>Компаний пока нет</b>
@@ -331,6 +335,136 @@ function receiptModal(b,after){
     const received=$$("#mform [data-rid]").map(inp=>({id:+inp.dataset.rid,received_qty:inp.value.trim()}));
     await api("/api/boutiques/"+b.id,{method:"PATCH",body:{receipt_status:s,receipt_date:s==="none"?"":v("r-date"),receipt_note:v("r-note"),received}});
     closeModal();toast("Сохранено","ok");after();
+  });
+}
+
+/* ───────────── поставщики и товары (справочник цен прихода) ───────────── */
+const yuan=v=>v==null||v===""?"—":fmtN(v)+" ¥";
+const normArt=x=>String(x||"").toLowerCase().replace(/[\s\-_.]/g,"");
+let CAT=null,CATQ="";
+async function renderCatalog(){
+  const d=await api("/api/catalog");CAT=d;const t=d.totals;
+  $("#main").innerHTML=`<div class="view">${bar("Поставщики и товары",t.suppliers?`${cnt(t.suppliers,"поставщик","поставщика","поставщиков")} · ${cnt(t.items,"товар","товара","товаров")}`:"",null,"",
+      `<a class="ibtn" href="#settings" title="Настройки" aria-label="Настройки">${I.gear}</a>`)}
+    ${homeTabs("catalog")}
+    ${t.suppliers?`<div class="search"><input id="cq" type="search" enterkeyhint="search" autocomplete="off" placeholder="Артикул или название" value="${esc(CATQ)}"></div>
+      <div id="cres"></div>`
+    :`<div class="empty card"><div class="big-ic">${I.box}</div><b>Справочник пока пуст</b>
+      <p>Загрузите файл с расшифрованными накладными — появятся поставщики, товары и цены прихода с поиском по артикулу.</p>
+      <div class="add-row two" style="justify-content:center"><button class="btn primary big" data-imp>Загрузить накладные</button><button class="btn big" id="add-sup">${I.plus}Поставщик</button></div></div>`}
+    <input type="file" id="imp-file" accept=".json,application/json" hidden></div>`;
+  $$("[data-imp]").forEach(b=>b.onclick=()=>$("#imp-file").click());
+  $("#imp-file").onchange=importCatalog;
+  if($("#add-sup"))$("#add-sup").onclick=()=>supplierModal();
+  if($("#cq")){$("#cq").oninput=e=>{CATQ=e.target.value;catalogResults()};catalogResults()}
+}
+function catalogResults(){
+  const el=$("#cres");if(!el)return;const d=CAT,q=CATQ.trim().toLowerCase(),nq=normArt(q);
+  if(!q){const t=d.totals;
+    el.innerHTML=`<div class="tiles">
+        <div class="card tile"><span>Поставщиков</span><b>${t.suppliers}</b></div>
+        <div class="card tile"><span>Товаров</span><b>${t.items}</b>${t.unsure?`<small>${t.unsure} проверить</small>`:""}</div>
+        <div class="card tile"><span>Сумма закупок</span><b>${yuan(t.total)}</b></div>
+        <div class="card tile warn"><span>К оплате</span><b>${yuan(t.to_pay)}</b>${t.deposit?`<small>залоги ${yuan(t.deposit)}</small>`:""}</div></div>
+      <div class="list">${d.suppliers.map(supplierRow).join("")}</div>
+      <div class="add-row two"><button class="btn primary big" data-imp>Загрузить накладные</button><button class="btn big" id="add-sup">${I.plus}Поставщик</button></div>`;
+    $$("#cres [data-imp]").forEach(b=>b.onclick=()=>$("#imp-file").click());$("#add-sup").onclick=()=>supplierModal();return}
+  const rank=i=>{const a=normArt(i.article);return a&&a===nq?0:a&&a.startsWith(nq)?1:a&&a.includes(nq)?2:3};
+  const hay=i=>[i.name,i.what,i.supplier_name,i.supplier_cn,i.note].join(" ").toLowerCase();
+  const found=d.items.filter(i=>(nq&&normArt(i.article).includes(nq))||hay(i).includes(q)).sort((a,b)=>rank(a)-rank(b)||a.supplier_name.localeCompare(b.supplier_name));
+  el.innerHTML=found.length?`<div class="hint" style="margin:0 2px 8px">Найдено: ${found.length}${found.length>150?" (показаны первые 150)":""}</div>
+      <div class="card">${found.slice(0,150).map(i=>citemRow(i,true)).join("")}</div>`
+    :`<div class="card empty" style="padding:26px 16px"><b>Ничего не найдено</b><p>Проверьте артикул или напишите часть названия.</p></div>`;
+  bindCitems(el,found,()=>renderCatalog());
+}
+function supplierRow(s){
+  return `<a class="card row" href="#supplier/${s.id}"><div class="main"><div class="ttl">${esc(s.name)} <span class="cn">${esc(s.name_cn||"")}</span></div>
+    <div class="sub">${[s.goods,s.place].filter(Boolean).map(esc).join(" · ")}</div>
+    <div class="nums"><div><span>Товаров</span><b>${s.items_count}</b></div><div><span>Сумма</span><b>${yuan(s.total)}</b></div>
+      ${s.deposit?`<div><span>Залог</span><b>${yuan(s.deposit)}</b></div>`:""}<div><span>К оплате</span><b class="warn">${yuan(s.to_pay)}</b></div>
+      ${s.unsure_count?`<div><span>Проверить</span><b>${s.unsure_count}</b></div>`:""}</div></div>${I.chev}</a>`;
+}
+function citemRow(i,withSupplier){
+  const sub=[withSupplier?`<a href="#supplier/${i.supplier_id}">${esc(i.supplier_name)}</a>`:"",
+    withSupplier&&i.invoice_number?`накл. №${esc(i.invoice_number)}${i.invoice_date?" от "+dRu(i.invoice_date):""}`:"",
+    i.qty!=null?fmtN(i.qty)+" шт":"",i.what?esc(i.what):"",i.note?esc(i.note):""].filter(Boolean).join(" · ");
+  return `<div class="item"><div class="main"><div class="ttl">${i.article?`<span class="art">${esc(i.article)}</span> `:""}${esc(i.name!==i.article?i.name:"")}${i.unsure?` <span class="chip unsure">проверить</span>`:""}</div>
+    ${sub?`<div class="sub">${sub}</div>`:""}</div>
+    <div class="amt price">${yuan(i.price)}${i.amount!=null?`<small>${yuan(i.amount)}</small>`:""}</div>
+    <div class="acts"><button class="mini" data-ce="${i.id}" title="Изменить">${I.edit}</button><button class="mini del" data-cd="${i.id}" title="Удалить">${I.trash}</button></div></div>`;
+}
+function bindCitems(root,items,after){
+  root.querySelectorAll("[data-ce]").forEach(x=>x.onclick=()=>citemModal(null,items.find(i=>i.id===+x.dataset.ce),after));
+  root.querySelectorAll("[data-cd]").forEach(x=>x.onclick=async()=>{const i=items.find(i=>i.id===+x.dataset.cd);
+    if(!await confirmBox("Удалить товар?",`«${i.article||i.name}» будет удалён из справочника.`))return;
+    try{await api("/api/catalog-items/"+i.id,{method:"DELETE"});toast("Товар удалён","ok");after()}catch(e){toast(e.message,"err")}});
+}
+async function importCatalog(e){
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  let data;try{data=JSON.parse(await f.text())}catch(err){toast("Это не файл накладных (.json)","err");return}
+  try{const r=await api("/api/catalog/import",{method:"POST",body:data});
+    toast(`Загружено: поставщиков ${r.suppliers}, накладных ${r.invoices}, товаров ${r.items}`+(r.skipped_invoices?` · уже были: ${r.skipped_invoices}`:""),"ok");renderCatalog()}
+  catch(err){toast(err.message,"err")}
+}
+async function renderSupplier(id){
+  const s=await api("/api/suppliers/"+id),items=s.items;
+  const again=()=>refresh(()=>renderSupplier(id));
+  const tel=t=>String(t||"").split(/[,;]/).map(x=>x.trim()).filter(Boolean).map(x=>{const n=x.replace(/[^\d+]/g,"");return n.length>=7?`<a href="tel:${n}">${esc(x)}</a>`:esc(x)}).join(", ");
+  const info=[["Контакт",esc(s.contact)],["Что продаёт",esc(s.goods)],["Где",esc(s.place)],["Телефоны",tel(s.phones)],["Заметка",esc(s.note)]].filter(x=>x[1]);
+  const groups=s.invoice_list.map(v=>({v,items:items.filter(i=>i.invoice_id===v.id)}));
+  const loose=items.filter(i=>!i.invoice_id);
+  $("#main").innerHTML=`<div class="view">${bar(s.name,s.name_cn||"","catalog","Товары",
+      `<button class="ibtn" id="s-edit" title="Изменить поставщика">${I.edit}</button><button class="ibtn danger" id="s-del" title="Удалить поставщика">${I.trash}</button>`)}
+    <div class="tiles">
+      <div class="card tile"><span>Товаров</span><b>${s.items_count}</b>${s.unsure_count?`<small>${s.unsure_count} проверить</small>`:""}</div>
+      <div class="card tile"><span>Сумма</span><b>${yuan(s.total)}</b></div>
+      <div class="card tile"><span>Залог</span><b>${yuan(s.deposit)}</b></div>
+      <div class="card tile warn"><span>К оплате</span><b>${yuan(s.to_pay)}</b></div></div>
+    ${info.length?`<div class="card fin kv"><div class="stat-list">${info.map(([k,v])=>`<div class="item"><div class="main"><div class="sub">${k}</div><div class="ttl">${v}</div></div></div>`).join("")}</div></div>`:""}
+    ${groups.map(({v,items})=>`<section><div class="card">
+      <div class="inv-h"><b>Накладная №${esc(v.number||"без номера")}</b><span class="hint">${v.date?dRu(v.date):""}</span><span class="sum">${yuan(v.lines_total)}</span>
+        <div class="hint" style="flex-basis:100%">${[v.paper_total!=null?`на бумаге ${yuan(v.paper_total)}`:"",v.deposit?`залог ${yuan(v.deposit)}`:"",v.note?esc(v.note):""].filter(Boolean).join(" · ")}</div></div>
+      ${items.map(i=>citemRow(i,false)).join("")||`<div class="item"><div class="hint">Товаров нет</div></div>`}</div></section>`).join("")}
+    ${loose.length?`<section><div class="card"><div class="inv-h"><b>Добавлены вручную</b></div>${loose.map(i=>citemRow(i,false)).join("")}</div></section>`:""}
+    <div class="add-row"><button class="btn primary big add-main" id="add-ci">${I.plus}Добавить товар</button></div></div>`;
+  bindCitems($("#main"),items,again);
+  $("#add-ci").onclick=()=>citemModal(s,null,again);
+  $("#s-edit").onclick=()=>supplierModal(s);
+  $("#s-del").onclick=async()=>{
+    if(!await confirmBox("Удалить поставщика?",`«${s.name}» будет удалён вместе с накладными и ${cnt(items.length,"товаром","товарами","товарами")}. Отменить это нельзя.`))return;
+    try{await api("/api/suppliers/"+s.id,{method:"DELETE"});toast("Поставщик удалён","ok");nav("catalog")}catch(e){toast(e.message,"err")}};
+}
+function supplierModal(s){
+  const isNew=!s;
+  openModal(isNew?"Новый поставщик":"Поставщик",`<div class="frm">
+    ${fld("text","s-name","Название",s?.name,{autofocus:true,ph:"например, Тайянхуа"})}
+    ${fld("text","s-cn","По-китайски (необязательно)",s?.name_cn,{ph:"太阳花"})}
+    ${fld("text","s-contact","Контакт",s?.contact,{ph:"имя продавца"})}
+    ${fld("text","s-goods","Что продаёт",s?.goods,{ph:"детские куртки"})}
+    ${fld("text","s-place","Где",s?.place,{full:true,ph:"рынок, зона, номер места"})}
+    ${fld("text","s-phones","Телефоны",s?.phones,{full:true,ph:"через запятую"})}
+    ${fld("area","s-note","Заметка",s?.note,{full:true})}</div>`,FOOT(isNew?"Добавить":"Сохранить"));
+  onSubmit(async()=>{
+    const body={name:v("s-name"),name_cn:v("s-cn"),contact:v("s-contact"),goods:v("s-goods"),place:v("s-place"),phones:v("s-phones"),note:v("s-note")};
+    const r=await api(isNew?"/api/suppliers":"/api/suppliers/"+s.id,{method:isNew?"POST":"PATCH",body});
+    closeModal();toast(isNew?"Поставщик добавлен":"Сохранено","ok");isNew?nav("supplier/"+r.id):route();
+  });
+}
+function citemModal(s,i,after){
+  const isNew=!i;
+  openModal(isNew?"Новый товар":"Товар",`<div class="frm">
+    ${fld("text","c-art","Артикул",i?.article,{autofocus:true,ph:"например, 8805"})}
+    ${fld("num","c-price","Цена прихода, ¥",i?.price,{ph:"0"})}
+    ${fld("text","c-name","Название",i&&i.name!==i.article?i.name:"",{full:true,ph:"как в накладной"})}
+    ${fld("text","c-what","Что это",i?.what,{ph:"детская куртка"})}
+    ${fld("num","c-qty","Количество, шт",i?.qty,{ph:"необязательно"})}
+    ${fld("text","c-note","Примечание",i?.note,{full:true,ph:"цвета, размеры…"})}
+    <div class="fg full"><div class="choice"><label><input type="checkbox" id="c-unsure" ${i?.unsure?"checked":""}><div><span class="t">Проверить</span><span class="d">прочитано с накладной неуверенно</span></div></label></div></div></div>`,FOOT(isNew?"Добавить":"Сохранить"));
+  onSubmit(async()=>{
+    const body={article:v("c-art"),name:v("c-name"),what:v("c-what"),qty:v("c-qty"),price:v("c-price"),note:v("c-note"),unsure:$("#c-unsure").checked};
+    if(isNew)body.supplier_id=s.id;
+    await api(isNew?"/api/catalog-items":"/api/catalog-items/"+i.id,{method:isNew?"POST":"PATCH",body});
+    closeModal();toast(isNew?"Товар добавлен":"Сохранено","ok");after();
   });
 }
 

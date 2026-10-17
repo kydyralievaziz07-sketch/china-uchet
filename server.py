@@ -28,7 +28,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.2.0"
+VERSION = "7.3.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -118,6 +118,28 @@ CREATE TABLE IF NOT EXISTS boutique_payments(
 CREATE INDEX IF NOT EXISTS idx_bq_company ON boutiques(company_id);
 CREATE INDEX IF NOT EXISTS idx_bi_boutique ON boutique_items(boutique_id);
 CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id);
+-- справочник: поставщики, их накладные и товары с ценой прихода (к бутикам не привязаны)
+CREATE TABLE IF NOT EXISTS suppliers(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL, name_cn TEXT, contact TEXT, goods TEXT, place TEXT, phones TEXT, note TEXT,
+  created_at TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS supplier_invoices(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+  number TEXT, date TEXT, paper_total REAL, deposit REAL NOT NULL DEFAULT 0, note TEXT, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS catalog_items(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+  invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE SET NULL,
+  article TEXT, name TEXT NOT NULL, what TEXT, qty REAL, price REAL, note TEXT,
+  unsure INTEGER NOT NULL DEFAULT 0,             -- 1: прочитано с накладной неуверенно, проверить
+  created_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_si_supplier ON supplier_invoices(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_ci_supplier ON catalog_items(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_ci_article ON catalog_items(article);
 """ + LEGACY_SQLITE
 # Та же схема для Postgres: SERIAL вместо AUTOINCREMENT, DOUBLE PRECISION вместо REAL, даты остаются текстом.
 PG_SCHEMA_SQL = """
@@ -134,10 +156,21 @@ CREATE TABLE IF NOT EXISTS boutique_payments(id SERIAL PRIMARY KEY, boutique_id 
   date TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, source TEXT NOT NULL DEFAULT 'own', note TEXT, created_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_bq_company ON boutiques(company_id);
 CREATE INDEX IF NOT EXISTS idx_bi_boutique ON boutique_items(boutique_id);
-CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id)
+CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id);
+CREATE TABLE IF NOT EXISTS suppliers(id SERIAL PRIMARY KEY, name TEXT NOT NULL, name_cn TEXT, contact TEXT, goods TEXT, place TEXT,
+  phones TEXT, note TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS supplier_invoices(id SERIAL PRIMARY KEY, supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+  number TEXT, date TEXT, paper_total DOUBLE PRECISION, deposit DOUBLE PRECISION NOT NULL DEFAULT 0, note TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS catalog_items(id SERIAL PRIMARY KEY, supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+  invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE SET NULL, article TEXT, name TEXT NOT NULL, what TEXT,
+  qty DOUBLE PRECISION, price DOUBLE PRECISION, note TEXT, unsure INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_si_supplier ON supplier_invoices(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_ci_supplier ON catalog_items(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_ci_article ON catalog_items(article)
 """
 LEGACY_TABLES = ["partners", "stores", "shipments", "shipment_items", "payments", "investments", "investor_payouts"]
-TABLES = ["settings", "companies", "boutiques", "boutique_items", "boutique_payments"] + LEGACY_TABLES
+TABLES = ["settings", "companies", "boutiques", "boutique_items", "boutique_payments",
+          "suppliers", "supplier_invoices", "catalog_items"] + LEGACY_TABLES
 
 # ---------------------------------------------------------------- база: подключение (SQLite локально / Postgres в облаке)
 if IS_PG:
@@ -501,7 +534,7 @@ class H(BaseHTTPRequestHandler):
                 if method == "PATCH": return self.settings_save(self._body())
             if path == "/api/summary" and method == "GET": return self.summary()
 
-            m_id = re.match(r"^/api/(companies|boutiques|items|payments)/(\d+)$", path)
+            m_id = re.match(r"^/api/(companies|boutiques|items|payments|suppliers|catalog-items)/(\d+)$", path)
             kind, oid = (m_id.group(1), int(m_id.group(2))) if m_id else (None, None)
             try:
                 if path == "/api/companies":
@@ -528,6 +561,19 @@ class H(BaseHTTPRequestHandler):
                     if method == "GET": return self.payment_one(oid)
                     if method == "PATCH": return self.payment_save(self._body(), oid)
                     if method == "DELETE": return self.payment_delete(oid)
+                # справочник поставщиков и товаров
+                if path == "/api/catalog" and method == "GET": return self.catalog(q)
+                if path == "/api/catalog/import" and method == "POST": return self.catalog_import(self._body())
+                if path == "/api/suppliers" and method == "POST": return self.supplier_save(self._body())
+                if kind == "suppliers":
+                    if method == "GET": return self.supplier_one(oid)
+                    if method == "PATCH": return self.supplier_save(self._body(), oid)
+                    if method == "DELETE": return self.supplier_delete(oid)
+                if path == "/api/catalog-items" and method == "POST": return self.citem_save(self._body())
+                if kind == "catalog-items":
+                    if method == "GET": return self.citem_one(oid)
+                    if method == "PATCH": return self.citem_save(self._body(), oid)
+                    if method == "DELETE": return self.citem_delete(oid)
             except ValueError as e:
                 return self._err(400, str(e))
             if path == "/api/backup" and method == "POST":
@@ -816,6 +862,157 @@ class H(BaseHTTPRequestHandler):
         if not r: c.close(); return self._err(404, "Платёж не найден")
         c.execute("DELETE FROM boutique_payments WHERE id=?", (pid,))
         self._reply_boutique(c, r["boutique_id"], {})
+
+    # -- справочник: поставщики, накладные, товары с ценой прихода (юани)
+    SUP_FIELDS = ("name", "name_cn", "contact", "goods", "place", "phones", "note")
+
+    def _catalog_data(self, c, supplier_id=None):
+        w, a = ("WHERE supplier_id=?", (supplier_id,)) if supplier_id else ("", ())
+        sups = {r["id"]: dict(r) for r in c.execute("SELECT * FROM suppliers %s ORDER BY id" % ("WHERE id=?" if supplier_id else ""), a)}
+        invs = {r["id"]: dict(r) for r in c.execute("SELECT * FROM supplier_invoices %s ORDER BY date, id" % w, a)}
+        items = [dict(r) for r in c.execute("SELECT * FROM catalog_items %s ORDER BY supplier_id, invoice_id, id" % w, a)]
+        for i in items:
+            i["amount"] = r2((i["qty"] or 0) * (i["price"] or 0)) if i["qty"] is not None and i["price"] is not None else None
+            s, v = sups.get(i["supplier_id"]) or {}, invs.get(i["invoice_id"]) or {}
+            i["supplier_name"] = s.get("name") or ""; i["supplier_cn"] = s.get("name_cn") or ""
+            i["invoice_number"] = v.get("number"); i["invoice_date"] = v.get("date")
+        for v in invs.values():
+            v["lines_total"] = r2(sum(i["amount"] or 0 for i in items if i["invoice_id"] == v["id"]))
+            v["items_count"] = len([i for i in items if i["invoice_id"] == v["id"]])
+        for s in sups.values():
+            mine = [i for i in items if i["supplier_id"] == s["id"]]
+            s["items_count"] = len(mine); s["unsure_count"] = len([i for i in mine if i["unsure"]])
+            s["total"] = r2(sum(i["amount"] or 0 for i in mine))
+            s["deposit"] = r2(sum(v["deposit"] or 0 for v in invs.values() if v["supplier_id"] == s["id"]))
+            s["to_pay"] = r2(s["total"] - s["deposit"])
+            s["invoices"] = ", ".join(v["number"] or "без №" for v in invs.values() if v["supplier_id"] == s["id"])
+        return sups, invs, items
+
+    def catalog(self, q):
+        """Весь справочник одним ответом; ?q= — поиск по артикулу, названию, поставщику (для бота)."""
+        c = self._db(); sups, invs, items = self._catalog_data(c); c.close()
+        qq = ((q.get("q") or [""])[0] or "").strip().lower()
+        if qq:
+            nq = re.sub(r"[\s\-_.]", "", qq)
+            items = [i for i in items if nq in re.sub(r"[\s\-_.]", "", (i["article"] or "").lower())
+                     or qq in " ".join(str(i[k] or "") for k in ("name", "what", "supplier_name", "supplier_cn", "note")).lower()]
+        tot = {"suppliers": len(sups), "items": len(items), "total": r2(sum(s["total"] for s in sups.values())),
+               "deposit": r2(sum(s["deposit"] for s in sups.values())), "unsure": len([i for i in items if i["unsure"]])}
+        tot["to_pay"] = r2(tot["total"] - tot["deposit"])
+        self._send(200, {"suppliers": list(sups.values()), "items": items, "totals": tot})
+
+    def supplier_one(self, sid):
+        c = self._db(); sups, invs, items = self._catalog_data(c, sid); c.close()
+        if sid not in sups: return self._err(404, "Поставщик не найден")
+        self._send(200, {**sups[sid], "invoice_list": list(invs.values()), "items": items})
+
+    def supplier_save(self, b, sid=None):
+        c = self._db()
+        old = c.execute("SELECT * FROM suppliers WHERE id=?", (sid,)).fetchone() if sid else None
+        if sid and not old: c.close(); return self._err(404, "Поставщик не найден")
+        cur = {**(dict(old) if old else {}), **b}
+        if not (cur.get("name") or "").strip(): c.close(); return self._err(400, "Укажите название поставщика")
+        vals = [(cur.get(k) or "").strip() for k in self.SUP_FIELDS]
+        if sid:
+            c.execute("UPDATE suppliers SET %s, updated_at=? WHERE id=?" % ",".join("%s=?" % k for k in self.SUP_FIELDS), vals + [now(), sid])
+        else:
+            sid = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(self.SUP_FIELDS), ",".join("?" * (len(self.SUP_FIELDS) + 2))),
+                            vals + [now(), now()]).lastrowid
+        commit(c); c.close(); self._send(200, {"ok": True, "id": sid})
+
+    def supplier_delete(self, sid):
+        c = self._db()
+        if not c.execute("SELECT 1 FROM suppliers WHERE id=?", (sid,)).fetchone(): c.close(); return self._err(404, "Поставщик не найден")
+        c.execute("DELETE FROM catalog_items WHERE supplier_id=?", (sid,))
+        c.execute("DELETE FROM supplier_invoices WHERE supplier_id=?", (sid,))
+        c.execute("DELETE FROM suppliers WHERE id=?", (sid,))
+        commit(c); c.close(); self._send(200, {"ok": True})
+
+    def citem_save(self, b, iid=None):
+        c = self._db()
+        old = c.execute("SELECT * FROM catalog_items WHERE id=?", (iid,)).fetchone() if iid else None
+        if iid and not old: c.close(); return self._err(404, "Товар не найден")
+        cur = {**(dict(old) if old else {}), **b}
+        try: sid = int(cur.get("supplier_id") or 0)
+        except Exception: sid = 0
+        if not c.execute("SELECT 1 FROM suppliers WHERE id=?", (sid,)).fetchone(): c.close(); return self._err(400, "Поставщик не найден")
+        inv = cur.get("invoice_id") or None
+        if inv and not c.execute("SELECT 1 FROM supplier_invoices WHERE id=? AND supplier_id=?", (inv, sid)).fetchone(): inv = None
+        article, name = (cur.get("article") or "").strip(), (cur.get("name") or "").strip()
+        if not (article or name): c.close(); return self._err(400, "Укажите артикул или название")
+        qty, price = num(cur.get("qty"), "количество"), num(cur.get("price"), "цена")
+        if (qty is not None and qty < 0) or (price is not None and price < 0): c.close(); return self._err(400, "Количество и цена не могут быть отрицательными")
+        vals = (sid, inv, article, name or article, (cur.get("what") or "").strip(), qty, price,
+                (cur.get("note") or "").strip(), 1 if cur.get("unsure") in (1, True, "1", "true") else 0)
+        if iid:
+            c.execute("UPDATE catalog_items SET supplier_id=?,invoice_id=?,article=?,name=?,what=?,qty=?,price=?,note=?,unsure=?,updated_at=? WHERE id=?",
+                      vals + (now(), iid))
+        else:
+            iid = c.execute("INSERT INTO catalog_items(supplier_id,invoice_id,article,name,what,qty,price,note,unsure,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                            vals + (now(), now())).lastrowid
+        commit(c); c.close(); self._send(200, {"ok": True, "id": iid})
+
+    def citem_one(self, iid):
+        c = self._db(); r = c.execute("SELECT * FROM catalog_items WHERE id=?", (iid,)).fetchone(); c.close()
+        if not r: return self._err(404, "Товар не найден")
+        self._send(200, dict(r))
+
+    def citem_delete(self, iid):
+        c = self._db()
+        if not c.execute("SELECT 1 FROM catalog_items WHERE id=?", (iid,)).fetchone(): c.close(); return self._err(404, "Товар не найден")
+        c.execute("DELETE FROM catalog_items WHERE id=?", (iid,)); commit(c); c.close(); self._send(200, {"ok": True})
+
+    def catalog_import(self, b):
+        """Загрузка расшифрованных накладных файлом .json: {suppliers, invoices, lines}.
+        Поставщик узнаётся по названию; уже загруженная накладная пропускается — повторная загрузка ничего не задвоит."""
+        sups, invs, lines = b.get("suppliers"), b.get("invoices"), b.get("lines")
+        if not (isinstance(sups, list) and isinstance(invs, list) and isinstance(lines, list)):
+            return self._err(400, "Это не файл накладных: нужны разделы suppliers, invoices, lines")
+        c = self._db(); res = {"suppliers": 0, "invoices": 0, "items": 0, "skipped_invoices": 0}
+        try:
+            existing = {}
+            for r in c.execute("SELECT id, name, name_cn FROM suppliers"):
+                for k in (r["name_cn"], r["name"]):
+                    if k: existing.setdefault(k.strip().lower(), r["id"])
+            sid_of = {}
+            for s in sups:
+                if not isinstance(s, dict) or not (s.get("name") or "").strip(): continue
+                key = s.get("key") or s["name"]
+                found = existing.get((s.get("name_cn") or "").strip().lower()) or existing.get(s["name"].strip().lower())
+                if not found:
+                    vals = [(str(s.get(k) or "")).strip() for k in self.SUP_FIELDS]
+                    found = c.execute("INSERT INTO suppliers(%s,created_at,updated_at) VALUES(%s)" % (",".join(self.SUP_FIELDS), ",".join("?" * (len(self.SUP_FIELDS) + 2))),
+                                      vals + [now(), now()]).lastrowid
+                    res["suppliers"] += 1
+                sid_of[key] = found
+            inv_of, skip = {}, set()
+            for v in invs:
+                sid = sid_of.get((v or {}).get("supplier"))
+                if not sid: continue
+                number, d = str(v.get("number") or "").strip(), valid_date(v.get("date"), "дата накладной", required=False)
+                paper = num(v.get("paper_total"), "итог накладной"); dep = num(v.get("deposit"), "залог") or 0.0
+                dup = c.execute("SELECT id FROM supplier_invoices WHERE supplier_id=? AND COALESCE(number,'')=? AND COALESCE(date,'')=?",
+                                (sid, number, d or "")).fetchone()
+                if dup: skip.add((v.get("supplier"), number)); res["skipped_invoices"] += 1; continue
+                inv_of[(v.get("supplier"), number)] = c.execute(
+                    "INSERT INTO supplier_invoices(supplier_id,number,date,paper_total,deposit,note,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (sid, number, d, paper, dep, str(v.get("note") or "").strip(), now())).lastrowid
+                res["invoices"] += 1
+            for l in lines:
+                if not isinstance(l, dict): continue
+                key = (l.get("supplier"), str(l.get("invoice") or "").strip())
+                sid = sid_of.get(l.get("supplier"))
+                if not sid or key in skip: continue
+                article, name = str(l.get("article") or "").strip(), str(l.get("name") or "").strip()
+                if not (article or name): continue
+                c.execute("INSERT INTO catalog_items(supplier_id,invoice_id,article,name,what,qty,price,note,unsure,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                          (sid, inv_of.get(key), article, name or article, str(l.get("what") or "").strip(), num(l.get("qty"), "количество"),
+                           num(l.get("price"), "цена"), str(l.get("note") or "").strip(), 1 if l.get("unsure") else 0, now(), now()))
+                res["items"] += 1
+            commit(c)
+        except ValueError:
+            c.rollback(); c.close(); raise
+        c.close(); self._send(200, {"ok": True, **res})
 
 def main():
     init_db()
