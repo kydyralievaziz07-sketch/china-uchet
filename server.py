@@ -7,16 +7,15 @@
   1. Компания — дата создания, сколько бутиков, стоимость закупок, оплачено, остаток.
   2. Бутик — город, номер/название, комментарий.
   3. Закупка бутика — товары (название, количество, цена, сумма, комментарий) и финансовый блок:
-     стоимость закупки (по товарам или вручную), депозит, оплаты Санжара (свои деньги или из депозита),
+     стоимость закупки (по товарам или вручную), депозит (залог / предоплата), оплаты Санжара,
      получение товара (не получен / частично / полностью).
 
 Финансовая логика бутика:
   стоимость     = сумма товаров, либо введённая вручную (режим выбирается явно, двойного учёта нет);
-  депозит       = внесённая сумма; использовано = платежи с источником «из депозита»;
-  оплачено      = платежи Санжара своими деньгами + платежи из депозита;
-  остаток       = стоимость − использованный депозит − деньги Санжара (не ниже нуля);
-  переплата     = если оплачено больше стоимости — показывается отдельно;
-  остаток депозита = депозит − использовано (не вычитается из стоимости, пока не проведён платёж).
+  депозит       = залог / предоплата: вычитается из стоимости сразу, отдельным платежом его вносить не нужно;
+  оплачено      = депозит + платежи Санжара (его собственные деньги);
+  остаток       = стоимость − депозит − платежи Санжара (не ниже нуля);
+  переплата     = если оплачено больше стоимости — показывается отдельно.
 
 Стандартная библиотека Python + SQLite локально; в облаке — pg8000 и Postgres (DATABASE_URL).
 Старые таблицы прежней версии (партии, поставщики, инвесторы, пользователи) в базе не трогаются.
@@ -29,7 +28,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.1.0"
+VERSION = "7.2.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -388,23 +387,22 @@ def commit(c):
 
 # ---------------------------------------------------------------- финансовая логика
 RECEIPT = ("none", "partial", "full")
-SOURCES = ("own", "deposit")
 TOTAL_MODES = ("items", "manual")
 
 def finance(b, items, pays):
-    """Все цифры бутика. Каждый платёж считается ровно один раз — по своему источнику."""
+    """Все цифры бутика. Депозит — предоплата: вычитается из стоимости целиком и один раз.
+    Платежи с пометкой «deposit» остались от версии 7.0 (когда депозит списывался платежом) — депозит уже
+    вычтен, поэтому в расчёт они не входят, иначе одна сумма считалась бы дважды."""
     items_total = r2(sum(i["amount"] or 0 for i in items))
     manual = b["total_mode"] == "manual" and b["manual_total"] is not None
     total = r2(b["manual_total"]) if manual else items_total
     deposit = r2(b["deposit"])
-    deposit_used = r2(sum(p["amount"] for p in pays if p["source"] == "deposit"))
-    paid_own = r2(sum(p["amount"] for p in pays if p["source"] == "own"))
-    paid = r2(deposit_used + paid_own)
+    paid_own = r2(sum(p["amount"] for p in pays if p["source"] != "deposit"))
+    paid = r2(deposit + paid_own)
     diff = r2(total - paid)
     qty_items = [i for i in items if i["qty"] not in (None, 0)]
     return {"items_total": items_total, "total": total, "total_mode": "manual" if manual else "items",
-            "deposit": deposit, "deposit_used": deposit_used, "deposit_left": r2(deposit - deposit_used),
-            "paid_own": paid_own, "paid": paid,
+            "deposit": deposit, "paid_own": paid_own, "paid": paid,
             "remaining": max(0.0, diff), "overpaid": max(0.0, r2(-diff)),
             "items_count": len(items), "payments_count": len(pays),
             "qty_total": r2(sum(i["qty"] for i in qty_items)) if qty_items else None,
@@ -426,7 +424,6 @@ def pack_company(sn, co, with_boutiques=False):
     d.update(boutiques_count=len(bouts),
              total=r2(sum(b["total"] for b in bouts)), paid=r2(sum(b["paid"] for b in bouts)),
              paid_own=r2(sum(b["paid_own"] for b in bouts)), deposit=r2(sum(b["deposit"] for b in bouts)),
-             deposit_used=r2(sum(b["deposit_used"] for b in bouts)),
              remaining=r2(sum(b["remaining"] for b in bouts)), overpaid=r2(sum(b["overpaid"] for b in bouts)),
              items_count=sum(b["items_count"] for b in bouts))
     if with_boutiques: d["boutiques"] = sorted(bouts, key=lambda b: ((b["city"] or "").lower(), (b["name"] or "").lower(), b["id"]))
@@ -602,7 +599,7 @@ class H(BaseHTTPRequestHandler):
         c = self._db(); sn = get_snap(c)
         rows = [pack_company(sn, co) for co in sn.companies.values()]
         c.close()
-        keys = ("total", "paid", "paid_own", "deposit", "deposit_used", "remaining", "overpaid", "items_count")
+        keys = ("total", "paid", "paid_own", "deposit", "remaining", "overpaid", "items_count")
         out = {k: r2(sum(r[k] for r in rows)) for k in keys}
         out.update(companies=len(rows), boutiques=sum(r["boutiques_count"] for r in rows), items_count=int(out["items_count"]))
         self._send(200, out)
@@ -688,9 +685,6 @@ class H(BaseHTTPRequestHandler):
         if "deposit" in b or "deposit_date" in b or "deposit_note" in b:
             dep = num(b.get("deposit", old.get("deposit")), "депозит") or 0.0
             if dep < 0: c.close(); return self._err(400, "Депозит не может быть отрицательным")
-            used = r2(sum(p["amount"] for p in c.execute("SELECT amount FROM boutique_payments WHERE boutique_id=? AND source='deposit'", (bid or 0,))))
-            if dep + 0.004 < used:
-                c.close(); return self._err(400, "Из депозита уже использовано %s — депозит не может быть меньше. Сначала исправьте платежи." % fmt_num(used))
             vals["deposit"] = dep
             vals["deposit_date"] = valid_date(b.get("deposit_date", old.get("deposit_date")), "дата депозита", required=False)
             vals["deposit_note"] = (b.get("deposit_note", old.get("deposit_note")) or "").strip()
@@ -804,16 +798,10 @@ class H(BaseHTTPRequestHandler):
         d = valid_date(cur.get("date"), "дата платежа")
         amount = num(cur.get("amount"), "сумма платежа", allow_none=False)
         if amount <= 0: c.close(); return self._err(400, "Сумма платежа должна быть больше нуля")
-        source = cur.get("source") or "own"
-        if source not in SOURCES: c.close(); return self._err(400, "Неверный источник платежа")
-        if source == "deposit":
-            used = r2(sum(p["amount"] for p in c.execute(
-                "SELECT amount FROM boutique_payments WHERE boutique_id=? AND source='deposit' AND id<>?", (bout["id"], pid or 0))))
-            left = r2(float(bout["deposit"] or 0) - used)
-            if amount > left + 0.004:
-                c.close()
-                return self._err(400, "В депозите доступно %s (внесено %s, использовано %s). Увеличьте депозит или уменьшите сумму."
-                                 % (fmt_num(left), fmt_num(bout["deposit"]), fmt_num(used)))
+        # платёж — всегда деньги Санжара. Депозит вычитается из стоимости сам, платежом «из депозита» его не списывают
+        if b.get("source") == "deposit":
+            c.close(); return self._err(400, "Депозит вычитается из стоимости сам — платёж «из депозита» не нужен. Запишите депозит в блоке «Депозит», а здесь — только деньги Санжара.")
+        source = "own" if (not pid or "source" in b) else (old.get("source") or "own")
         vals = (bout["id"], d, amount, source, (cur.get("note") or "").strip())
         if pid:
             c.execute("UPDATE boutique_payments SET boutique_id=?,date=?,amount=?,source=?,note=? WHERE id=?", vals + (pid,))
@@ -828,10 +816,6 @@ class H(BaseHTTPRequestHandler):
         if not r: c.close(); return self._err(404, "Платёж не найден")
         c.execute("DELETE FROM boutique_payments WHERE id=?", (pid,))
         self._reply_boutique(c, r["boutique_id"], {})
-
-def fmt_num(v):
-    s = "{:,.2f}".format(float(v or 0)).replace(",", " ")
-    return s.rstrip("0").rstrip(".") if "." in s else s
 
 def main():
     init_db()

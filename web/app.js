@@ -136,7 +136,7 @@ async function renderCompany(id){
     <div class="tiles">
       <div class="card tile"><span>Бутиков</span><b>${bs.length}</b></div>
       <div class="card tile"><span>Закупки</span><b>${money(c.total)}</b></div>
-      <div class="card tile accent"><span>Оплачено</span><b>${money(c.paid)}</b><small>Санжар ${money(c.paid_own)} · депозит ${money(c.deposit_used)}</small></div>
+      <div class="card tile accent"><span>Оплачено</span><b>${money(c.paid)}</b><small>депозит ${money(c.deposit)} · Санжар ${money(c.paid_own)}</small></div>
       <div class="card tile ${c.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(c.remaining)}</b>${c.overpaid>0?`<small>переплата ${money(c.overpaid)}</small>`:""}</div>
     </div>
     ${bs.length?`<div class="list">${bs.map(boutRow).join("")}</div>
@@ -191,8 +191,8 @@ async function renderBoutique(id){
       <div class="sec-h"><h2>Финансы</h2></div>
       <div class="tiles">
         <div class="card tile"><span>Стоимость закупки</span><b>${money(b.total)}</b><small>${b.total_mode==="manual"?"указана вручную":"по товарам"}</small></div>
-        <div class="card tile"><span>Депозит</span><b>${money(b.deposit)}</b><small>${b.deposit>0?`использовано ${money(b.deposit_used)}`:"не вносился"}</small></div>
-        <div class="card tile accent"><span>Заплатил Санжар</span><b>${money(b.paid)}</b><small>свои ${money(b.paid_own)} · депозит ${money(b.deposit_used)}</small></div>
+        <div class="card tile"><span>Депозит</span><b>${money(b.deposit)}</b><small>${b.deposit>0?"вычтен из стоимости":"не вносился"}</small></div>
+        <div class="card tile accent"><span>Заплатил Санжар</span><b>${money(b.paid_own)}</b><small>${b.payments.length?cnt(b.payments.length,"платёж","платежа","платежей"):"платежей нет"}</small></div>
         <div class="card tile ${b.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(b.remaining)}</b><small>${b.overpaid>0?"переплата "+money(b.overpaid):(b.total>0&&b.remaining<=0?"закупка оплачена":"")}</small></div>
       </div>
 
@@ -205,12 +205,13 @@ async function renderBoutique(id){
       <div class="card fin"><div class="fin-h"><h3>Депозит</h3><button class="btn sm" id="ed-dep">${b.deposit>0?"Изменить":"Внести"}</button></div>
         <div class="big">${money(b.deposit)}</div>
         <div class="line">${b.deposit>0
-          ?`${b.deposit_date?"внесён "+dRu(b.deposit_date)+" · ":""}использовано <b>${money(b.deposit_used)}</b> · ещё не использовано <b>${money(b.deposit_left)}</b>${b.deposit_note?" · "+esc(b.deposit_note):""}`
-          :"Депозит не вносился."} Депозит считается отдельно от денег Санжара и засчитывается в оплату только платежом «из депозита».</div></div>
+          ?`${b.deposit_date?"внесён "+dRu(b.deposit_date)+" · ":""}${b.deposit_note?esc(b.deposit_note)+" · ":""}залог / предоплата — <b>уже вычтена</b> из стоимости закупки.`
+          :"Депозит не вносился."} Депозит считается отдельно от денег Санжара и в платежах Санжара не участвует.</div></div>
 
       <div class="card fin"><div class="fin-h"><h3>Оплаты Санжара</h3><button class="btn sm primary" id="add-pay">${I.plus}Добавить платёж</button></div>
-        <div class="line">Всего заплатил <b>${money(b.paid)}</b> · из своих денег <b>${money(b.paid_own)}</b> · из депозита <b>${money(b.deposit_used)}</b></div>
-        <div class="formula">Осталось оплатить = ${money(b.total)} (стоимость) − ${money(b.deposit_used)} (использованный депозит) − ${money(b.paid_own)} (деньги Санжара) = <b>${money(b.remaining)}</b>${b.overpaid>0?` · оплачено больше стоимости: переплата <b>${money(b.overpaid)}</b>`:""}</div>
+        <div class="line">Всего заплатил Санжар своих денег: <b>${money(b.paid_own)}</b></div>
+        <div class="formula">Осталось оплатить = ${money(b.total)} (стоимость) − ${money(b.deposit)} (депозит) − ${money(b.paid_own)} (Санжар) = <b>${money(b.remaining)}</b>${b.overpaid>0?` · оплачено больше стоимости: переплата <b>${money(b.overpaid)}</b>`:""}</div>
+        ${pays.some(p=>p.source==="deposit")?`<div class="hint" style="margin-top:8px">Записи с пометкой «из депозита» остались от прежней версии. Депозит и так вычтен из стоимости, поэтому они в расчёт не входят — их можно удалить.</div>`:""}
         ${pays.length?`<div class="pays">${pays.map(payRow).join("")}</div>`:`<div class="hint" style="margin-top:10px">Платежей пока нет.</div>`}</div>
 
       <div class="card fin"><div class="fin-h"><h3>Получение товара</h3><button class="btn sm" id="ed-rec">Отметить</button></div>
@@ -247,7 +248,7 @@ function itemRow(i,b,sym){
     <div class="acts"><button class="mini" data-ie="${i.id}" title="Изменить">${I.edit}</button><button class="mini del" data-id="${i.id}" title="Удалить">${I.trash}</button></div></div>`;
 }
 function payRow(p){
-  return `<div class="item"><div class="main"><div class="ttl">${money(p.amount)} <span class="chip ${p.source}">${p.source==="deposit"?"из депозита":"свои деньги"}</span></div>
+  return `<div class="item"><div class="main"><div class="ttl">${money(p.amount)}${p.source==="deposit"?` <span class="chip deposit">из депозита — не учитывается</span>`:""}</div>
     <div class="sub">${dRu(p.date)}${p.note?" · "+esc(p.note):""}</div></div>
     <div class="acts"><button class="mini" data-pe="${p.id}" title="Изменить">${I.edit}</button><button class="mini del" data-pd="${p.id}" title="Удалить">${I.trash}</button></div></div>`;
 }
@@ -291,8 +292,7 @@ function depositModal(b,after){
     ${fld("num","d-amount","Сумма депозита",b.deposit||"",{ph:"0",autofocus:true})}
     ${fld("date","d-date","Дата внесения (необязательно)",b.deposit_date||"")}
     ${fld("text","d-note","Комментарий",b.deposit_note,{full:true,ph:"необязательно"})}</div>
-    <div class="hint" style="margin-top:10px">Депозит не вычитается из стоимости сам по себе. Чтобы оплатить закупку депозитом, добавьте платёж «из депозита».
-    ${b.deposit_used>0?` Уже использовано ${money(b.deposit_used)} — меньше этой суммы указать нельзя.`:""}</div>`,FOOT());
+    <div class="hint" style="margin-top:10px">Депозит — залог или предоплата. Он сразу вычитается из стоимости закупки: остаток = стоимость − депозит − оплаты Санжара. Вносить его отдельным платежом не нужно.</div>`,FOOT());
   onSubmit(async()=>{
     await api("/api/boutiques/"+b.id,{method:"PATCH",body:{deposit:v("d-amount")||0,deposit_date:v("d-date"),deposit_note:v("d-note")}});
     closeModal();toast("Депозит сохранён","ok");after();
@@ -300,17 +300,13 @@ function depositModal(b,after){
 }
 function paymentModal(b,p,after){
   const isNew=!p;
-  const avail=b.deposit_left+(p?.source==="deposit"?+p.amount:0);
   openModal(isNew?"Платёж Санжара":"Платёж",`<div class="frm">
     ${fld("date","p-date","Дата платежа",p?.date||todayISO())}
     ${fld("num","p-amount","Сумма",p?.amount,{ph:"0",autofocus:true})}
-    <div class="fg full"><label>Откуда деньги</label><div class="choice">
-      <label><input type="radio" name="src" value="own" ${!p||p.source==="own"?"checked":""}><div><span class="t">Свои деньги Санжара</span><span class="d">Санжар платит из собственных средств</span></div></label>
-      <label><input type="radio" name="src" value="deposit" ${p?.source==="deposit"?"checked":""} ${b.deposit>0?"":"disabled"}><div><span class="t">Из депозита</span>
-        <span class="d">${b.deposit>0?`ещё не использовано ${money(avail)}`:"сначала внесите депозит в блоке «Депозит»"}</span></div></label></div></div>
-    ${fld("text","p-note","Комментарий",p?.note,{full:true,ph:"необязательно"})}</div>`,FOOT(isNew?"Добавить":"Сохранить"));
+    ${fld("text","p-note","Комментарий",p?.note,{full:true,ph:"необязательно"})}</div>
+    <div class="hint" style="margin-top:10px">Здесь — только деньги, которые заплатил Санжар. Депозит записывается в своём блоке и вычитается из стоимости сам.</div>`,FOOT(isNew?"Добавить":"Сохранить"));
   onSubmit(async()=>{
-    const body={boutique_id:b.id,date:v("p-date"),amount:v("p-amount"),source:$("#mform input[name=src]:checked").value,note:v("p-note")};
+    const body={boutique_id:b.id,date:v("p-date"),amount:v("p-amount"),note:v("p-note")};
     await api(isNew?"/api/payments":"/api/payments/"+p.id,{method:isNew?"POST":"PATCH",body});
     closeModal();toast(isNew?"Платёж добавлен":"Сохранено","ok");after();
   });

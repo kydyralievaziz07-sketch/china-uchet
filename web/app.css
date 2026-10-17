@@ -81,7 +81,6 @@ main.off{display:none}
 .chip.none{background:var(--line2);color:var(--muted)}
 .chip.partial{background:var(--warn-soft);color:var(--warn)}
 .chip.full{background:var(--ok-soft);color:var(--ok)}
-.chip.own{background:var(--accent-soft);color:var(--accent)}
 .chip.deposit{background:var(--warn-soft);color:var(--warn)}
 .empty{text-align:center;padding:48px 20px;color:var(--muted)}
 .empty .big-ic{width:64px;height:64px;margin:0 auto 14px;border-radius:20px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center}
