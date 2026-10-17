@@ -244,13 +244,13 @@ def context():
             "currency": (api("GET", "/api/settings") or {}).get("currency") or "USD"}
 
 def brief(ctx):
-    co = [{"id": x["id"], "название": x.get("name") or "", "дата": x["date"], "бутиков": x.get("boutiques_count"),
+    co = [{"id": x["id"], "сезон": x.get("name") or "", "бутиков": x.get("boutiques_count"),
            "стоимость": x.get("total"), "оплачено": x.get("paid"), "остаток": x.get("remaining")} for x in ctx["companies"]]
-    bs = [{"id": x["id"], "компания_id": x["company_id"], "город": x["city"], "бутик": x["name"],
+    bs = [{"id": x["id"], "сезон_id": x["company_id"], "одежда": x.get("category_name"), "город": x["city"], "бутик": x["name"],
            "стоимость": x.get("total"), "депозит": x.get("deposit"),
            "санжар_заплатил": x.get("paid_own"), "остаток": x.get("remaining"), "получение": x.get("receipt_status")}
           for x in ctx["boutiques"][-30:]]
-    return json.dumps({"валюта": ctx["currency"], "компании": co, "бутики": bs}, ensure_ascii=False)
+    return json.dumps({"валюта": ctx["currency"], "сезоны": co, "бутики": bs}, ensure_ascii=False)
 
 def hints(ctx):
     cities = list(dict.fromkeys(x["city"] for x in ctx["boutiques"]))[:12]
@@ -264,11 +264,13 @@ SYSTEM = """Ты — помощник владельца в его програ�
 коротко и по-человечески. У тебя ПОЛНЫЙ доступ к данным программы через инструменты data_get (читать)
 и data_write (создавать, изменять, удалять). Работу делаешь сам, не отправляй владельца «зайти на сайт».
 
-УСТРОЙСТВО УЧЁТА: Компания → Бутики → Закупка бутика (товары + финансы).
-• /api/summary — итоги по всем компаниям.
-• /api/companies — GET список, POST создать {date ГГГГ-ММ-ДД, name, note}.
-  /api/companies/{id} — GET карточка с бутиками, PATCH изменить, DELETE удалить вместе с бутиками.
-• /api/boutiques — GET список (?company=id), POST создать {company_id, city, name (номер или название), note}.
+УСТРОЙСТВО УЧЁТА: Сезон (Зима, Лето…) → Одежда (мужская / женская / детская) → Бутики → Закупка (товары + финансы).
+В API сезон называется company.
+• /api/summary — итоги по всем сезонам.
+• /api/companies — сезоны: GET список, POST создать {name: «Зима 2026», note}.
+  /api/companies/{id} — GET карточка: бутики и итоги по видам одежды (categories), PATCH изменить, DELETE удалить вместе с бутиками.
+• /api/boutiques — GET список (?company=id&category=men), POST создать {company_id, category, city, name (номер или название), note}.
+  category: men — мужская одежда (по умолчанию), women — женская, kids — детская.
   /api/boutiques/{id} — GET карточка: товары items[], платежи payments[] и все цифры; PATCH изменить; DELETE удалить.
   Поля PATCH: city, name, note; total_mode (items — стоимость по товарам | manual — одной суммой) и manual_total;
   deposit (сумма депозита), deposit_date, deposit_note; receipt_status (none не получен | partial частично | full полностью),
@@ -292,8 +294,8 @@ SYSTEM = """Ты — помощник владельца в его програ�
 КАК РАБОТАТЬ:
 — Справочник компаний и бутиков дан ниже: бери id оттуда, лишний раз не запрашивай.
 — Бутик не назван — бери последний подходящий из справочника; если неясно, спроси одной строкой: «В какой бутик?».
-— Бутика нет, но владелец назвал его («бутик 12 в Гуанчжоу») — создай в последней компании и используй.
-  Нет ни одной компании — создай с сегодняшней датой. Город не назван — спроси, заглушек не заводи.
+— Бутика нет, но владелец назвал его («бутик 12 в Гуанчжоу») — создай в последнем сезоне и используй.
+  Вид одежды не назван — мужская (men). Нет ни одного сезона — спроси, какой завести. Город не назван — спроси, заглушек не заводи.
 — «Внёс депозит» → PATCH бутика deposit. «Заплатил», «Санжар заплатил» → POST /api/payments.
   Залог, предоплата, «оставил в залог» — это депозит (PATCH бутика), а не платёж. «Товар на столько-то» без списка → total_mode manual.
 — «Товар пришёл / келди / жетти» → receipt_status full (или partial с количествами), оплату не трогай.
@@ -425,7 +427,7 @@ def cmd(chat, text, thread):
         say(chat, "Этот чат: <code>%s</code>\nТема: <code>%s</code>" % (chat, thread or "—"), thread=thread); return True
     if t.startswith(("итог", "сводка")):
         d, c = api("GET", "/api/summary"), cur()
-        say(chat, "<b>Итоги</b>\nКомпаний: %s · бутиков: %s\nСтоимость закупок: %s\nОплачено: %s (депозит %s · Санжар %s)\n"
+        say(chat, "<b>Итоги</b>\nСезонов: %s · бутиков: %s\nСтоимость закупок: %s\nОплачено: %s (депозит %s · Санжар %s)\n"
                   "Осталось оплатить: %s%s"
             % (d.get("companies"), d.get("boutiques"), money(d.get("total"), c), money(d.get("paid"), c),
                money(d.get("deposit"), c), money(d.get("paid_own"), c), money(d.get("remaining"), c),
