@@ -1,5 +1,6 @@
 # Render Blueprint — облачная версия «Бутики · учёт» (бесплатный тариф).
 # Сервис создан через API, этот файл — декларация на случай пересоздания.
+# Входа нет: программа открывается по обычной ссылке.
 # Правило: каждая новая переменная окружения в server.py сразу добавляется сюда с sync:false.
 services:
   - type: web
@@ -15,21 +16,13 @@ services:
         sync: false
       - key: KN_PG_SCHEMA          # схема внутри общего проекта Supabase
         value: china
-      - key: KN_AUTH               # в облаке вход по логину и паролю обязателен
-        value: "1"
-      - key: KN_OPEN_KEY           # ключ личной ссылки: …/?k=КЛЮЧ — вход без пароля
-        sync: false
-      - key: KN_ADMIN_PASSWORD     # запасной пароль владельца (логин admin), задаётся при старте
-        sync: false
-      - key: KN_SECRET             # подпись сессионных cookie
-        sync: false
       - key: KN_KEEPALIVE_URL      # https://china-uchet.onrender.com/api/ping — не даёт бесплатному сервису засыпать
         sync: false
       - key: KN_TG_TOKEN           # токен бота @Kitaibizmartbot — голосовое управление
         sync: false
       - key: KN_TG_SECRET          # подпись вебхука Telegram
         sync: false
-      - key: KN_TG_ALLOW           # id владельца в Telegram: только он управляет учётом
+      - key: KN_TG_ALLOW           # id владельца в Telegram: только он управляет учётом через бота
         sync: false
       - key: KN_TG_HOOK_URL        # https://china-uchet.onrender.com/api/tg/hook
         sync: false

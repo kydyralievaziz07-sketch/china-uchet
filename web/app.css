@@ -172,18 +172,6 @@ section{margin-top:22px}
 .linkbox{display:flex;gap:8px;align-items:center;margin:8px 0}
 .linkbox code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;padding:10px 12px;border-radius:10px;background:var(--line2)}
 
-/* ───── вход ───── */
-#login-ov{position:fixed;inset:0;z-index:90;background:var(--bg);display:none;align-items:center;justify-content:center;padding:20px}
-#login-ov.show{display:flex}
-.login-card{width:100%;max-width:380px;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:34px 28px 28px;text-align:center;box-shadow:var(--shadow)}
-.login-card .logo{width:56px;height:56px;border-radius:18px;margin:0 auto 16px;background:var(--accent);color:#fff;font-weight:800;font-size:24px;display:grid;place-items:center}
-.login-card h2{font-size:21px;margin-bottom:4px}
-.login-card p{color:var(--muted);font-size:14px;margin-bottom:20px}
-.login-card input{width:100%;height:48px;border:1px solid var(--line);border-radius:12px;padding:0 14px;margin-bottom:10px;background:var(--bg);outline:none;font-size:16px}
-.login-card input:focus{border-color:var(--accent)}
-.login-card .btn{width:100%;margin-top:4px}
-.login-err{color:var(--bad);font-size:14px;min-height:20px;margin-top:10px}
-
 /* ───── сообщения ───── */
 #toasts{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:100;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;width:calc(100% - 32px);max-width:420px}
 .toast{padding:12px 18px;border-radius:12px;background:#1F2433;color:#fff;font-size:15px;font-weight:500;box-shadow:0 10px 30px rgba(0,0,0,.3);animation:fade .2s;text-align:center;max-width:100%}

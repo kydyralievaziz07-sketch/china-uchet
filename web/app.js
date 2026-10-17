@@ -6,7 +6,7 @@
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const SYM={USD:"$",KGS:"сом",KZT:"₸",RUB:"₽",CNY:"¥",EUR:"€"};
 const REC={none:"Не получен",partial:"Получен частично",full:"Получен полностью"};
-const S={user:null,settings:{currency:"USD"}};
+const S={info:{},settings:{currency:"USD"}};
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtN=v=>(Math.round((+v||0)*100)/100).toLocaleString("ru-RU",{maximumFractionDigits:2});
 const money=v=>{const n=+v||0;return (n<-0.004?"−":"")+fmtN(Math.abs(n))+" "+(SYM[S.settings.currency]||S.settings.currency)};
@@ -18,7 +18,6 @@ const v=id=>($("#"+id)?.value??"").trim();
 const isMobile=()=>matchMedia("(max-width:600px)").matches;
 async function api(path,opts={}){
   const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts,body:opts.body?JSON.stringify(opts.body):undefined});
-  if(r.status===401){showLogin();throw new Error("Нужен вход")}
   const j=await r.json().catch(()=>({}));
   if(!r.ok)throw new Error(j.error||"Ошибка "+r.status);
   return j;
@@ -52,7 +51,7 @@ function onSubmit(fn){
   const f=$("#mform");
   f.onsubmit=async e=>{e.preventDefault();const btn=f.querySelector("button[type=submit]");$("#m-err").textContent="";
     btn.classList.add("busy");btn.disabled=true;
-    try{await fn()}catch(err){if(err.message!=="Нужен вход")$("#m-err").textContent=err.message}
+    try{await fn()}catch(err){$("#m-err").textContent=err.message}
     finally{btn.classList.remove("busy");btn.disabled=false}};
 }
 function confirmBox(title,text,okLabel){
@@ -89,7 +88,7 @@ async function route(){
     else if(a==="settings")await renderSettings();
     else await renderCompanies();
     if(seq===routeSeq)window.scrollTo(0,0);
-  }catch(e){if(e.message!=="Нужен вход"){toast(e.message,"err");if(a)nav("")}}
+  }catch(e){toast(e.message,"err");if(a)nav("")}
 }
 addEventListener("hashchange",route);
 async function refresh(fn){const y=scrollY;await fn();window.scrollTo(0,y)}
@@ -341,7 +340,7 @@ function receiptModal(b,after){
 
 /* ───────────── настройки ───────────── */
 async function renderSettings(){
-  const u=S.user;S.settings=await api("/api/settings");
+  const u=S.info;S.settings=await api("/api/settings");
   $("#main").innerHTML=`<div class="view">${bar("Настройки","","","Компании","")}
     <div class="card fin"><div class="fin-h"><h3>Валюта</h3><select id="st-cur" style="height:40px;border:1px solid var(--line);border-radius:10px;padding:0 10px;background:var(--bg)">
       ${Object.keys(SYM).map(c=>`<option ${S.settings.currency===c?"selected":""}>${c}</option>`).join("")}</select></div>
@@ -351,14 +350,8 @@ async function renderSettings(){
       <div class="item"><div class="main"><div class="ttl">Загрузить базу из файла .db</div><div class="sub">заменит все компании, бутики, товары и платежи данными из файла</div></div><button class="btn sm" id="rs-btn">Выбрать файл</button><input type="file" id="rs-file" accept=".db" hidden></div>
       ${u?.cloud?"":`<div class="item"><div class="main"><div class="ttl">Резервная копия в папку backups</div><div class="sub">делается сама при каждом запуске, хранятся 30 последних</div></div><button class="btn sm" id="bk">Сделать сейчас</button></div>`}
     </div></div>
-    ${u?.auth?`<div class="card fin"><div class="fin-h"><h3>Вход</h3></div><div class="stat-list">
-      ${u.link?`<div class="item"><div class="main"><div class="ttl">Личная ссылка входа</div><div class="sub">открыли один раз — устройство помнит вход год. На iPhone: Safari → «Поделиться» → «На экран Домой». Ссылка заменяет пароль, не пересылайте её посторонним.</div>
-        <div class="linkbox"><code id="ph-link">${esc(location.origin+u.link)}</code><button type="button" class="btn sm" id="ph-copy">Скопировать</button></div></div></div>`:""}
-      <div class="item"><div class="main"><div class="ttl">Пароль</div><div class="sub">вы вошли как ${esc(u.name||u.login)}</div></div><button class="btn sm" id="pw-btn">Сменить</button></div>
-      <div class="item"><div class="main"><div class="ttl">Выйти из программы</div></div><button class="btn sm" id="out">Выйти</button></div>
-    </div></div>`:""}
     <div class="card fin"><div class="fin-h"><h3>Программа</h3></div>
-      <div class="hint">Версия ${esc(u?.version||"")} · ${u?.cloud?"облако":"этот компьютер"}. Структура: Компании → Бутики → Закупка и финансы.</div></div></div>`;
+      <div class="hint">Версия ${esc(u?.version||"")} · ${u?.cloud?"облако":"этот компьютер"}. Структура: Компании → Бутики → Закупка и финансы. Программа открывается по обычной ссылке, без входа.</div></div></div>`;
   $("#st-cur").onchange=async()=>{try{S.settings=await api("/api/settings",{method:"PATCH",body:{currency:$("#st-cur").value}});toast("Валюта сохранена","ok")}catch(e){toast(e.message,"err")}};
   $("#rs-btn").onclick=()=>$("#rs-file").click();
   $("#rs-file").onchange=async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;
@@ -368,34 +361,14 @@ async function renderSettings(){
       toast(`База загружена: компаний ${c.companies||0}, бутиков ${c.boutiques||0}, платежей ${c.boutique_payments||0}`,"ok");setTimeout(()=>location.reload(),1500)}
     catch(err){toast(err.message,"err")}};
   if($("#bk"))$("#bk").onclick=async()=>{try{const r=await api("/api/backup",{method:"POST"});toast("Копия сделана: "+r.file,"ok")}catch(e){toast(e.message,"err")}};
-  if($("#ph-copy"))$("#ph-copy").onclick=async()=>{const t=$("#ph-link").textContent;
-    try{await navigator.clipboard.writeText(t);toast("Ссылка скопирована","ok")}
-    catch(e){const r=document.createRange();r.selectNode($("#ph-link"));getSelection().removeAllRanges();getSelection().addRange(r);toast("Ссылка выделена — скопируйте её","")}};
-  if($("#pw-btn"))$("#pw-btn").onclick=passwordModal;
-  if($("#out"))$("#out").onclick=async()=>{await api("/api/logout",{method:"POST"});location.reload()};
 }
-function passwordModal(){
-  openModal("Сменить пароль",`<div class="frm">
-    <div class="fg full"><label for="pw-old">Старый пароль</label><input id="pw-old" type="password" autofocus autocomplete="current-password"></div>
-    <div class="fg"><label for="pw-new">Новый пароль</label><input id="pw-new" type="password" autocomplete="new-password"></div>
-    <div class="fg"><label for="pw-new2">Ещё раз</label><input id="pw-new2" type="password" autocomplete="new-password"></div></div>`,FOOT("Сменить"));
-  onSubmit(async()=>{
-    if($("#pw-new").value!==$("#pw-new2").value)throw new Error("Новые пароли не совпадают");
-    await api("/api/password",{method:"POST",body:{old:$("#pw-old").value,new:$("#pw-new").value}});closeModal();toast("Пароль изменён","ok");
-  });
-}
-
-/* ───────────── вход (облачный режим) и старт ───────────── */
-function showLogin(){$("#login-ov").classList.add("show");$("#main").classList.add("off")}
-$("#login-form").onsubmit=async e=>{
-  e.preventDefault();$("#l-err").textContent="";const btn=$("#l-btn");btn.classList.add("busy");
-  try{
-    const r=await api("/api/login",{method:"POST",body:{login:$("#l-login").value,password:$("#l-pass").value}});
-    S.user=r.user;S.settings=await api("/api/settings");$("#login-ov").classList.remove("show");$("#main").classList.remove("off");route();
-  }catch(err){$("#l-err").textContent=err.message}
-  finally{btn.classList.remove("busy")}
-};
+/* ───────────── старт ───────────── */
 (async function(){
-  try{S.user=await api("/api/me");S.settings=await api("/api/settings");$("#main").classList.remove("off");route()}
-  catch(e){showLogin()}
+  try{
+    S.info=await api("/api/ping");S.settings=await api("/api/settings");
+    $("#main").classList.remove("off");route();
+  }catch(e){
+    $("#main").classList.remove("off");
+    $("#main").innerHTML=`<div class="empty card" style="margin-top:40px"><b>Не удалось подключиться</b><p>${esc(e.message)}. Облачная версия может просыпаться до 30 секунд — подождите и повторите.</p><button class="btn primary" onclick="location.reload()">Повторить</button></div>`;
+  }
 })();
