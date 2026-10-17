@@ -388,7 +388,7 @@ function catalogResults(){
   if(!q){const t=d.totals;
     el.innerHTML=`<div class="tiles">
         <div class="card tile"><span>Поставщиков</span><b>${t.suppliers}</b></div>
-        <div class="card tile"><span>Товаров</span><b>${t.items}</b>${t.unsure?`<small>${t.unsure} проверить</small>`:""}</div>
+        <div class="card tile"><span>Товаров</span><b>${t.items}</b>${t.unsure?`<small>${t.unsure} с неточным названием</small>`:""}</div>
         <div class="card tile"><span>Сумма закупок</span><b>${yuan(t.total)}</b></div>
         <div class="card tile warn"><span>К оплате</span><b>${yuan(t.to_pay)}</b>${t.deposit?`<small>залоги ${yuan(t.deposit)}</small>`:""}</div></div>
       <div class="list">${d.suppliers.map(supplierRow).join("")}</div>
@@ -407,13 +407,13 @@ function supplierRow(s){
     <div class="sub">${[s.goods,s.place].filter(Boolean).map(esc).join(" · ")}</div>
     <div class="nums"><div><span>Товаров</span><b>${s.items_count}</b></div><div><span>Сумма</span><b>${yuan(s.total)}</b></div>
       ${s.deposit?`<div><span>Залог</span><b>${yuan(s.deposit)}</b></div>`:""}<div><span>К оплате</span><b class="warn">${yuan(s.to_pay)}</b></div>
-      ${s.unsure_count?`<div><span>Проверить</span><b>${s.unsure_count}</b></div>`:""}</div></div>${I.chev}</a>`;
+      ${s.unsure_count?`<div><span>Неточных названий</span><b>${s.unsure_count}</b></div>`:""}</div></div>${I.chev}</a>`;
 }
 function citemRow(i,withSupplier){
   const sub=[withSupplier?`<a href="#supplier/${i.supplier_id}">${esc(i.supplier_name)}</a>`:"",
     withSupplier&&i.invoice_number?`накл. №${esc(i.invoice_number)}${i.invoice_date?" от "+dRu(i.invoice_date):""}`:"",
     i.qty!=null?fmtN(i.qty)+" шт":"",i.what?esc(i.what):"",i.note?esc(i.note):""].filter(Boolean).join(" · ");
-  return `<div class="item"><div class="main"><div class="ttl">${i.article?`<span class="art">${esc(i.article)}</span> `:""}${esc(i.name!==i.article?i.name:"")}${i.unsure?` <span class="chip unsure">проверить</span>`:""}</div>
+  return `<div class="item"><div class="main"><div class="ttl">${i.article?`<span class="art">${esc(i.article)}</span> `:""}${esc(i.article&&(i.name||"").startsWith(i.article)?i.name.slice(i.article.length).trim():i.name||"")}${i.unsure?` <span class="chip unsure">название неточно</span>`:""}</div>
     ${sub?`<div class="sub">${sub}</div>`:""}</div>
     <div class="amt price">${yuan(i.price)}${i.amount!=null?`<small>${yuan(i.amount)}</small>`:""}</div>
     <div class="acts"><button class="mini" data-ce="${i.id}" title="Изменить">${I.edit}</button><button class="mini del" data-cd="${i.id}" title="Удалить">${I.trash}</button></div></div>`;
@@ -441,7 +441,7 @@ async function renderSupplier(id){
   $("#main").innerHTML=`<div class="view">${bar(s.name,s.name_cn||"","catalog","Товары",
       `<button class="ibtn" id="s-edit" title="Изменить поставщика">${I.edit}</button><button class="ibtn danger" id="s-del" title="Удалить поставщика">${I.trash}</button>`)}
     <div class="tiles">
-      <div class="card tile"><span>Товаров</span><b>${s.items_count}</b>${s.unsure_count?`<small>${s.unsure_count} проверить</small>`:""}</div>
+      <div class="card tile"><span>Товаров</span><b>${s.items_count}</b>${s.unsure_count?`<small>${s.unsure_count} с неточным названием</small>`:""}</div>
       <div class="card tile"><span>Сумма</span><b>${yuan(s.total)}</b></div>
       <div class="card tile"><span>Залог</span><b>${yuan(s.deposit)}</b></div>
       <div class="card tile warn"><span>К оплате</span><b>${yuan(s.to_pay)}</b></div></div>
@@ -484,7 +484,7 @@ function citemModal(s,i,after){
     ${fld("text","c-what","Что это",i?.what,{ph:"детская куртка"})}
     ${fld("num","c-qty","Количество, шт",i?.qty,{ph:"необязательно"})}
     ${fld("text","c-note","Примечание",i?.note,{full:true,ph:"цвета, размеры…"})}
-    <div class="fg full"><div class="choice"><label><input type="checkbox" id="c-unsure" ${i?.unsure?"checked":""}><div><span class="t">Проверить</span><span class="d">прочитано с накладной неуверенно</span></div></label></div></div></div>`,FOOT(isNew?"Добавить":"Сохранить"));
+    <div class="fg full"><div class="choice"><label><input type="checkbox" id="c-unsure" ${i?.unsure?"checked":""}><div><span class="t">Название неточно</span><span class="d">иероглифы с накладной разобраны не полностью</span></div></label></div></div></div>`,FOOT(isNew?"Добавить":"Сохранить"));
   onSubmit(async()=>{
     const body={article:v("c-art"),name:v("c-name"),what:v("c-what"),qty:v("c-qty"),price:v("c-price"),note:v("c-note"),unsure:$("#c-unsure").checked};
     if(isNew)body.supplier_id=s.id;
