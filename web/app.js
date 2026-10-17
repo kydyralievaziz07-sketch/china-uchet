@@ -41,7 +41,8 @@ function openModal(title,body,footer){
     <div class="mb">${body}<div class="err-box" id="m-err"></div></div><div class="mf">${footer}</div></form>`;
   $("#modal-ov").classList.add("show");
   $$("#modal [data-x]").forEach(b=>b.onclick=closeModal);
-  setTimeout(()=>{if(!isMobile())m.querySelector("[autofocus]")?.focus()},60);
+  // курсор в первое поле — только если человек ещё ничего не начал вводить в этом окне
+  setTimeout(()=>{if(!isMobile()&&!m.contains(document.activeElement))m.querySelector("[autofocus]")?.focus()},60);
 }
 function closeModal(){$("#modal-ov").classList.remove("show")}
 $("#modal-ov").addEventListener("mousedown",e=>{if(e.target.id==="modal-ov")closeModal()});

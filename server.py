@@ -29,7 +29,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.4.0"
+VERSION = "7.4.1"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
@@ -1044,10 +1044,47 @@ def import_catalog(c, b):
 
 SEED_DIR = os.path.join(ROOT, "seed")
 
-def seed_catalog():
-    """Накладные, положенные в папку seed/, загружаются при запуске — каждый файл ровно один раз.
-    Отметка о загрузке хранится в настройках по хэшу файла: если потом что-то удалить или исправить
-    в программе, перезапуск сервера это не вернёт."""
+def import_boutiques(c, b):
+    """Бутики без товаров: {season, category, boutiques: [{city, name, total, deposit, note}]}.
+    Сезон ищется по названию (без учёта регистра), нет — создаётся. Бутик с тем же городом и номером
+    в этом сезоне и разделе одежды пропускается, поэтому повторная загрузка ничего не задвоит."""
+    season, cat, rows = (b.get("season") or "").strip(), b.get("category") or "men", b.get("boutiques")
+    if not season or cat not in CATEGORIES or not isinstance(rows, list):
+        raise ValueError("Нужны season, category (men | women | kids) и список boutiques")
+    res = {"season_created": 0, "boutiques": 0, "skipped": 0}
+    try:
+        seasons = [(r["id"], (r["name"] or "").strip().lower()) for r in c.execute("SELECT id, name FROM companies ORDER BY id")]
+        want = season.lower()
+        cid = next((i for i, n in seasons if n == want), None)
+        if cid is None:
+            starts = [i for i, n in seasons if n.startswith(want)]
+            cid = starts[0] if len(starts) == 1 else None
+        if cid is None:
+            cid = c.execute("INSERT INTO companies(date,name,note,created_at,updated_at) VALUES(?,?,?,?,?)",
+                            (today(), season, "", now(), now())).lastrowid
+            res["season_created"] = 1
+        have = {((r["city"] or "").strip().lower(), (r["name"] or "").strip().lower())
+                for r in c.execute("SELECT city, name FROM boutiques WHERE company_id=? AND category=?", (cid, cat))}
+        for x in rows:
+            if not isinstance(x, dict): continue
+            city, name = str(x.get("city") or "").strip(), str(x.get("name") or "").strip()
+            if not (city and name): continue
+            if (city.lower(), name.lower()) in have: res["skipped"] += 1; continue
+            total, dep = num(x.get("total"), "общая сумма"), num(x.get("deposit"), "депозит") or 0.0
+            c.execute("""INSERT INTO boutiques(company_id,category,city,name,note,total_mode,manual_total,deposit,deposit_date,deposit_note,
+                         receipt_status,receipt_date,receipt_note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (cid, cat, city, name, str(x.get("note") or "").strip(), "manual" if total is not None else "items", total,
+                       dep, None, "", "none", None, "", now(), now()))
+            have.add((city.lower(), name.lower())); res["boutiques"] += 1
+    except Exception:
+        c.rollback(); raise
+    return res
+
+def seed_data():
+    """Файлы из папки seed/ загружаются при запуске — каждый ровно один раз: накладные в справочник
+    (suppliers/invoices/lines) или бутики без товаров (season/category/boutiques).
+    Отметка о загрузке хранится в настройках по хэшу файла вместе с самой загрузкой: если потом
+    что-то удалить или исправить в программе, перезапуск сервера это не вернёт."""
     if not os.path.isdir(SEED_DIR): return
     for fn in sorted(os.listdir(SEED_DIR)):
         if not fn.endswith(".json"): continue
@@ -1056,18 +1093,23 @@ def seed_catalog():
         c = db()
         try:
             if c.execute("SELECT 1 FROM settings WHERE key=?", (mark,)).fetchone(): continue
-            res = import_catalog(c, json.loads(raw.decode("utf-8")))
+            data = json.loads(raw.decode("utf-8"))
+            if "boutiques" in data:
+                res = import_boutiques(c, data)
+                msg = "бутиков %d, уже были %d%s" % (res["boutiques"], res["skipped"], ", сезон создан" if res["season_created"] else "")
+            else:
+                res = import_catalog(c, data)
+                msg = "поставщиков %d, накладных %d, товаров %d, уже были %d" % (res["suppliers"], res["invoices"], res["items"], res["skipped_invoices"])
             set_setting(c, mark, "%s %s" % (fn, now())); commit(c)
-            print("Справочник: загружен %s — поставщиков %d, накладных %d, товаров %d, уже были %d"
-                  % (fn, res["suppliers"], res["invoices"], res["items"], res["skipped_invoices"]), flush=True)
+            print("Загружен %s: %s" % (fn, msg), flush=True)
         except Exception as e:
-            print("Справочник: не удалось загрузить %s: %s" % (fn, e), flush=True)
+            print("Не удалось загрузить %s: %s" % (fn, e), flush=True)
         finally:
             c.close()
 
 def main():
     init_db()
-    seed_catalog()
+    seed_data()
     b = backup_db()
     if b: print("Резервная копия:", os.path.basename(b))
     icon = os.path.join(WEB, "icon.png")

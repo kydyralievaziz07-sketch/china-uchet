@@ -1,0 +1,72 @@
+{
+ "season": "Зима",
+ "category": "kids",
+ "boutiques": [
+  {
+   "city": "Хужо",
+   "name": "6-1",
+   "total": 29196,
+   "deposit": 2000
+  },
+  {
+   "city": "Хужо",
+   "name": "C-53-55",
+   "total": 11792,
+   "deposit": 1000
+  },
+  {
+   "city": "Хужо",
+   "name": "A-108-109",
+   "total": 13040,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "33-5",
+   "total": 15592,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "A-47",
+   "total": 8091,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "B-113",
+   "total": 20000,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "C-041",
+   "total": 4042,
+   "deposit": 500
+  },
+  {
+   "city": "Хужо",
+   "name": "69",
+   "total": 22888,
+   "deposit": 1000
+  },
+  {
+   "city": "Хужо",
+   "name": "C-69",
+   "total": 2967.5,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "B-117-118",
+   "total": 4245,
+   "deposit": 0
+  },
+  {
+   "city": "Хужо",
+   "name": "33-7-8",
+   "total": 8120,
+   "deposit": 0
+  }
+ ]
+}
