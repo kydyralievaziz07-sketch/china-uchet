@@ -19,25 +19,22 @@
   остаток депозита = депозит − использовано (не вычитается из стоимости, пока не проведён платёж).
 
 Стандартная библиотека Python + SQLite локально; в облаке — pg8000 и Postgres (DATABASE_URL).
-Старые таблицы прежней версии (партии, поставщики, инвесторы) в базе не трогаются.
+Старые таблицы прежней версии (партии, поставщики, инвесторы, пользователи) в базе не трогаются.
+
+Входа нет: программа открывается по обычной ссылке, без логина, пароля и ключей.
 """
-import base64, hashlib, hmac, json, os, re, shutil, sqlite3, secrets, struct, sys, threading, time, zlib
+import base64, json, os, re, shutil, sqlite3, secrets, struct, threading, time, zlib
 from collections import defaultdict
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-VERSION = "7.0.0"
+VERSION = "7.1.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB   = os.path.join(ROOT, "china.db")
 WEB  = os.path.join(ROOT, "web")
 PORT = int(os.environ.get("PORT", "8902"))
 HOST = "0.0.0.0" if (os.environ.get("RENDER") or os.environ.get("KN_HOST") == "0.0.0.0") else "127.0.0.1"
-SECRET_FILE = os.path.join(ROOT, ".secret")
-# Вход по логину и паролю нужен только облачной версии. Локально программа открывается сразу.
-AUTH = os.environ.get("KN_AUTH", "0") == "1"
-# Личная ссылка вместо пароля: открыл https://…/?k=КЛЮЧ один раз — устройство помнит вход год.
-OPEN_KEY = (os.environ.get("KN_OPEN_KEY") or "").strip()
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 PG_SCHEMA = re.sub(r"[^a-z0-9_]", "", (os.environ.get("KN_PG_SCHEMA") or "china").lower()) or "china"
@@ -47,13 +44,13 @@ except Exception as _e:
     tgbot = None; print("Голосовой бот не подключён:", _e)
 
 def web_url():
-    """Адрес программы для кнопки «Открыть» в Telegram — с личным ключом, чтобы открывалось сразу."""
+    """Адрес программы для кнопки «Открыть» в Telegram."""
     u = (os.environ.get("KN_WEB_URL") or "").strip()
     if not u:
         ka = (os.environ.get("KN_KEEPALIVE_URL") or "").strip()
         u = ka.replace("/api/ping", "")
     u = u.rstrip("/")
-    return (u + "/?k=" + OPEN_KEY) if (u and OPEN_KEY) else (u or None)
+    return u or None
 
 # ---------------------------------------------------------------- база: схема
 # Таблицы прежней версии (partners, stores, shipments, shipment_items, payments, investments, investor_payouts)
@@ -80,13 +77,6 @@ CREATE TABLE IF NOT EXISTS investor_payouts(id INTEGER PRIMARY KEY AUTOINCREMENT
   amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'USD', kind TEXT NOT NULL DEFAULT 'profit', note TEXT, created_at TEXT);
 """
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  login TEXT NOT NULL UNIQUE,
-  pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'owner',
-  name TEXT, created_at TEXT
-);
 CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY, value TEXT
 );
@@ -132,8 +122,6 @@ CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id);
 """ + LEGACY_SQLITE
 # Та же схема для Postgres: SERIAL вместо AUTOINCREMENT, DOUBLE PRECISION вместо REAL, даты остаются текстом.
 PG_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY, login TEXT NOT NULL UNIQUE, pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'owner', name TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS companies(id SERIAL PRIMARY KEY, date TEXT NOT NULL, name TEXT, note TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS boutiques(id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -150,7 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_bi_boutique ON boutique_items(boutique_id);
 CREATE INDEX IF NOT EXISTS idx_bp_boutique ON boutique_payments(boutique_id)
 """
 LEGACY_TABLES = ["partners", "stores", "shipments", "shipment_items", "payments", "investments", "investor_payouts"]
-TABLES = ["users", "settings", "companies", "boutiques", "boutique_items", "boutique_payments"] + LEGACY_TABLES
+TABLES = ["settings", "companies", "boutiques", "boutique_items", "boutique_payments"] + LEGACY_TABLES
 
 # ---------------------------------------------------------------- база: подключение (SQLite локально / Postgres в облаке)
 if IS_PG:
@@ -242,8 +230,6 @@ def migrate_sqlite(c):
                    ("investor_payouts", "created_at")):
         if cols(t) and col not in cols(t): c.execute("ALTER TABLE %s ADD COLUMN %s TEXT" % (t, col))
 
-def pw_hash(password, salt): return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000).hex()
-
 def init_db():
     c = db()
     if IS_PG:
@@ -251,19 +237,7 @@ def init_db():
         c.executescript(PG_SCHEMA_SQL)
     else:
         c.executescript(SCHEMA); migrate_sqlite(c)
-    if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-        salt = secrets.token_hex(16)
-        c.execute("INSERT INTO users(login,pw_hash,salt,role,name,created_at) VALUES(?,?,?,?,?,?)",
-                  ("admin", pw_hash("china2026", salt), salt, "owner", "Владелец", now()))
     commit(c)
-    # пароль владельца из окружения (облако): применяется, если отличается от текущего
-    env_pw = os.environ.get("KN_ADMIN_PASSWORD")
-    if env_pw:
-        u = c.execute("SELECT * FROM users WHERE login='admin'").fetchone()
-        if u and not hmac.compare_digest(pw_hash(env_pw, u["salt"]), u["pw_hash"]):
-            salt = secrets.token_hex(16)
-            c.execute("UPDATE users SET pw_hash=?, salt=? WHERE id=?", (pw_hash(env_pw, salt), salt, u["id"]))
-            commit(c); print("Пароль владельца обновлён из KN_ADMIN_PASSWORD")
     c.close()
 
 def backup_db(keep=30):
@@ -296,12 +270,12 @@ def export_sqlite_bytes():
     return data
 
 def import_sqlite_file(path):
-    """Загрузить базу из файла .db (перенос с компьютера в облако и обратно). Пользователи не трогаются."""
+    """Загрузить базу из файла .db (перенос с компьютера в облако и обратно)."""
     src = sqlite3.connect(path); src.row_factory = sqlite3.Row
     try: names = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     except sqlite3.DatabaseError: src.close(); raise ValueError("Файл повреждён или это не база SQLite")
     if not ({"companies", "shipments"} & names): src.close(); raise ValueError("Это не база этой программы")
-    tables = [t for t in TABLES if t != "users"]
+    tables = list(TABLES)
     counts = {}
     if IS_PG:
         c = db()
@@ -334,16 +308,8 @@ def import_sqlite_file(path):
             except Exception: counts[t] = 0
         src.close()
         backup_db()
-        # пользователей берём из текущей базы, остальное — из файла
-        cur = sqlite3.connect(DB); cur.row_factory = sqlite3.Row
-        users = [dict(r) for r in cur.execute("SELECT * FROM users")]
-        cur.close()
         shutil.copy2(path, DB)
         c = db(); c.executescript(SCHEMA); migrate_sqlite(c)
-        c.execute("DELETE FROM users")
-        for u in users:
-            c.execute("INSERT INTO users(id,login,pw_hash,salt,role,name,created_at) VALUES(?,?,?,?,?,?,?)",
-                      (u["id"], u["login"], u["pw_hash"], u["salt"], u["role"], u["name"], u["created_at"]))
         commit(c); c.close()
         return counts
     src.close()
@@ -378,47 +344,6 @@ def keepalive():
             try: urllib.request.urlopen(url, timeout=25).read()
             except Exception: pass
     threading.Thread(target=loop, daemon=True).start()
-
-# ---------------------------------------------------------------- сессии
-def get_secret():
-    env = os.environ.get("KN_SECRET")
-    if env: return env
-    if not os.path.exists(SECRET_FILE):
-        open(SECRET_FILE, "w").write(secrets.token_hex(32))
-    return open(SECRET_FILE).read().strip()
-
-SECRET = None
-def sign(msg): return hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-
-def make_token(login, days=30):
-    exp = str(int(time.time()) + days*86400)
-    raw = "%s|%s" % (login, exp)
-    return base64.urlsafe_b64encode(("%s|%s" % (raw, sign(raw))).encode()).decode()
-
-TOK_CACHE = {}   # токен → (пользователь, время); чтобы не ходить в базу за каждым запросом
-def check_token(tok):
-    hit = TOK_CACHE.get(tok)
-    if hit and time.time() - hit[1] < 120: return dict(hit[0])
-    try:
-        raw = base64.urlsafe_b64decode(tok.encode()).decode()
-        login, exp, sig = raw.rsplit("|", 2)
-        if not hmac.compare_digest(sig, sign("%s|%s" % (login, exp))): return None
-        if int(exp) < time.time(): return None
-        c = db(); u = c.execute("SELECT id,login,role,name FROM users WHERE login=? AND role='owner'", (login,)).fetchone(); c.close()
-        if u: TOK_CACHE[tok] = (dict(u), time.time())
-        return dict(u) if u else None
-    except Exception as e:
-        print("check_token:", repr(e), file=sys.stderr, flush=True)
-        return None
-
-def check_password(login, password):
-    c = db(); u = c.execute("SELECT * FROM users WHERE login=?", (login,)).fetchone(); c.close()
-    if not u: return None
-    return dict(u) if hmac.compare_digest(pw_hash(password, u["salt"]), u["pw_hash"]) else None
-
-def owner_user():
-    c = db(); u = c.execute("SELECT id,login,role,name FROM users WHERE role='owner' ORDER BY id LIMIT 1").fetchone(); c.close()
-    return dict(u) if u else None
 
 # ---------------------------------------------------------------- настройки
 CURRENCIES = ("USD", "KGS", "KZT", "RUB", "CNY", "EUR")
@@ -551,17 +476,6 @@ class H(BaseHTTPRequestHandler):
         try: return json.loads(self.rfile.read(n).decode())
         except Exception: return {}
 
-    def _user(self):
-        cookie = self.headers.get("Cookie") or ""
-        m = re.search(r"kn_session=([^;]+)", cookie)
-        u = check_token(m.group(1)) if m else None
-        if u or AUTH: return u
-        return owner_user()   # локальный режим: вход не нужен
-
-    def _cookie(self, tok, max_age):
-        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") == "https") else ""
-        return "kn_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax%s" % (tok, max_age, secure)
-
     def tg_hook(self):
         """Сюда Telegram присылает сообщения. Отвечаем сразу, разбираем голос в фоне."""
         if not (tgbot and tgbot.enabled()): return self._err(404, "Бот выключен")
@@ -571,23 +485,6 @@ class H(BaseHTTPRequestHandler):
         except Exception as e: print("вебхук Telegram:", e)
         return self._send(200, {"ok": True})
 
-    def _link(self, user):
-        """Владельцу отдаём его личную ссылку входа — показать в настройках и открыть на телефоне."""
-        return {"link": "/?k=" + OPEN_KEY} if (OPEN_KEY and user) else {}
-
-    def _key_login(self, path, q):
-        """Вход по ссылке: ставим cookie на год и убираем ключ из адреса."""
-        if not (OPEN_KEY and q.get("k")) or path.startswith("/api/"): return False
-        try: ok = hmac.compare_digest(q["k"][0].encode("utf-8"), OPEN_KEY.encode("utf-8"))
-        except Exception: ok = False
-        if not ok: return False
-        u = owner_user()
-        if not u: return False
-        self._send(302, b"", "text/html; charset=utf-8",
-                   {"Location": path if path.startswith("/") else "/",
-                    "Set-Cookie": self._cookie(make_token(u["login"], 365), 365*86400)})
-        return True
-
     # -- маршрутизация
     def route(self, method):
         # http.server декодирует строку запроса как latin-1 — возвращаем UTF-8
@@ -595,22 +492,13 @@ class H(BaseHTTPRequestHandler):
         except Exception: raw = self.path
         p = urlparse(raw)
         path, q = p.path.rstrip("/") or "/", parse_qs(p.query)
-        self.user = None; self.c = None
+        self.c = None
         try:
-            if method == "GET" and self._key_login(p.path or "/", q): return
             if path == "/" and method == "GET": return self.page()
             if path.startswith("/static/") and method == "GET": return self.static(path)
             if path == "/api/ping" and method == "GET":
-                return self._send(200, {"ok": True, "version": VERSION, "db": "postgres" if IS_PG else "sqlite", "auth": AUTH})
-            if path == "/api/login" and method == "POST": return self.api_login()
+                return self._send(200, {"ok": True, "version": VERSION, "cloud": IS_PG, "db": "postgres" if IS_PG else "sqlite"})
             if path == "/api/tg/hook" and method == "POST": return self.tg_hook()
-            user = self._user(); self.user = user
-            if path.startswith("/api/") and not user: return self._err(401, "Нужен вход")
-            if path == "/api/logout" and method == "POST":
-                return self._send(200, {"ok": True}, headers={"Set-Cookie": self._cookie("", 0)})
-            if path == "/api/me" and method == "GET":
-                return self._send(200, {**user, "version": VERSION, "auth": AUTH, "cloud": IS_PG, **self._link(user)})
-            if path == "/api/password" and method == "POST": return self.password_change(self._body())
             if path == "/api/settings":
                 if method == "GET": return self.settings_get()
                 if method == "PATCH": return self.settings_save(self._body())
@@ -680,8 +568,6 @@ class H(BaseHTTPRequestHandler):
                  "webmanifest": "application/manifest+json"}
         ext = name.rsplit(".", 1)[-1] if "." in name else ""
         if name == "manifest.webmanifest":
-            # start_url намеренно не указан: тогда иконка на домашнем экране запоминает тот адрес,
-            # с которого её добавили — вместе с ключом входа, и приложение открывается сразу.
             data = json.dumps({"name": "Бутики · учёт", "short_name": "Бутики", "display": "standalone",
                                "background_color": "#F5F6F8", "theme_color": "#2F6FE3",
                                "icons": [{"src": "/static/icon.png", "sizes": "180x180", "type": "image/png"}]}, ensure_ascii=False)
@@ -689,25 +575,6 @@ class H(BaseHTTPRequestHandler):
         fp = os.path.join(WEB, name)
         if ext not in types or not os.path.isfile(fp): return self._err(404, "Нет файла")
         self._send(200, open(fp, "rb").read(), types[ext])
-
-    # -- вход
-    def api_login(self):
-        b = self._body()
-        u = check_password((b.get("login") or "").strip().lower(), b.get("password") or "")
-        if not u: time.sleep(0.6); return self._err(403, "Неверный логин или пароль")
-        if u["role"] != "owner": return self._err(403, "Вход только для владельца")
-        tok = make_token(u["login"])
-        self._send(200, {"ok": True, "user": {"id": u["id"], "login": u["login"], "role": u["role"], "name": u["name"],
-                                              "version": VERSION, "auth": AUTH, "cloud": IS_PG, **self._link(u)}},
-                   headers={"Set-Cookie": self._cookie(tok, 30*86400)})
-
-    def password_change(self, b):
-        old, new = b.get("old") or "", b.get("new") or ""
-        if len(new) < 6: return self._err(400, "Новый пароль — не короче 6 символов")
-        if not check_password(self.user["login"], old): return self._err(403, "Старый пароль неверный")
-        salt = secrets.token_hex(16)
-        c = self._db(); c.execute("UPDATE users SET pw_hash=?, salt=? WHERE id=?", (pw_hash(new, salt), salt, self.user["id"]))
-        commit(c); c.close(); TOK_CACHE.clear(); self._send(200, {"ok": True})
 
     # -- настройки
     def settings_get(self):
@@ -967,9 +834,7 @@ def fmt_num(v):
     return s.rstrip("0").rstrip(".") if "." in s else s
 
 def main():
-    global SECRET
     init_db()
-    SECRET = get_secret()
     b = backup_db()
     if b: print("Резервная копия:", os.path.basename(b))
     icon = os.path.join(WEB, "icon.png")
@@ -979,12 +844,10 @@ def main():
     keepalive()
     if tgbot:
         threading.Timer(2, lambda: tgbot.start({
-            "port": PORT, "web_url": web_url(),
-            "token": lambda: make_token((owner_user() or {}).get("login") or "admin", 1)})).start()
+            "port": PORT, "web_url": web_url()})).start()
     srv = ThreadingHTTPServer((HOST, PORT), H)
-    print("Бутики · учёт %s работает: http://%s:%d · база: %s · вход: %s" % (
-        VERSION, "localhost" if HOST == "127.0.0.1" else HOST, PORT, "Postgres/" + PG_SCHEMA if IS_PG else "SQLite",
-        "по паролю" if AUTH else "не нужен"), flush=True)
+    print("Бутики · учёт %s работает: http://%s:%d · база: %s · вход не нужен" % (
+        VERSION, "localhost" if HOST == "127.0.0.1" else HOST, PORT, "Postgres/" + PG_SCHEMA if IS_PG else "SQLite"), flush=True)
     srv.serve_forever()
 
 if __name__ == "__main__":
