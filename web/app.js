@@ -103,14 +103,16 @@ const coTitle=c=>c.name||("Сезон от "+dRu(c.date));
 const CATS=[["men","Мужская одежда"],["women","Женская одежда"],["kids","Детская одежда"]];
 const catName=k=>(CATS.find(x=>x[0]===k)||[k,""])[1];
 const SEASONS=["Зима","Весна","Лето","Осень"];
+const hasanLine=x=>`<div class="hasan${x.paid_own>0?"":" none"}">${x.paid_own>0?`Оплатил Хасан: <b>${money(x.paid_own)}</b>`:"Хасан ещё не платил"}</div>`;
 const numsHtml=x=>`<div class="nums"><div><span>Закупки</span><b>${money(x.total)}</b></div><div><span>Оплачено</span><b>${money(x.paid)}</b></div>
       <div><span>Осталось</span><b class="${x.remaining>0?"warn":"ok"}">${money(x.remaining)}</b></div>
-      ${x.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(x.overpaid)}</b></div>`:""}</div>`;
+      ${x.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(x.overpaid)}</b></div>`:""}</div>${hasanLine(x)}`;
 const tilesHtml=(x,count)=>`<div class="tiles">
       <div class="card tile"><span>Бутиков</span><b>${count}</b></div>
       <div class="card tile"><span>Закупки</span><b>${money(x.total)}</b></div>
-      <div class="card tile accent"><span>Оплачено</span><b>${money(x.paid)}</b><small>депозит ${money(x.deposit)} · Санжар ${money(x.paid_own)}</small></div>
+      <div class="card tile accent"><span>Оплачено</span><b>${money(x.paid)}</b><small>депозит ${money(x.deposit)} · Хасан ${money(x.paid_own)}</small></div>
       <div class="card tile ${x.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(x.remaining)}</b>${x.overpaid>0?`<small>переплата ${money(x.overpaid)}</small>`:""}</div>
+      <div class="card tile hasan-tile wide"><span>Оплатил Хасан</span><b>${money(x.paid_own)}</b><small>свои деньги, без депозита</small></div>
     </div>`;
 async function renderCompanies(){
   const rows=(await api("/api/companies")).rows;
@@ -184,7 +186,7 @@ function boutRow(b){
     <div class="sub">${cnt(b.items_count,"товар","товара","товаров")} · <span class="chip ${b.receipt_status}">${REC[b.receipt_status]}</span>${b.note?" · "+esc(b.note):""}</div>
     <div class="nums"><div><span>Стоимость</span><b>${money(b.total)}</b></div><div><span>Оплачено</span><b>${money(b.paid)}</b></div>
       <div><span>Осталось</span><b class="${b.remaining>0?"warn":"ok"}">${money(b.remaining)}</b></div>
-      ${b.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(b.overpaid)}</b></div>`:""}</div></div>${I.chev}</a>`;
+      ${b.overpaid>0?`<div><span>Переплата</span><b class="bad">${money(b.overpaid)}</b></div>`:""}</div>${hasanLine(b)}</div>${I.chev}</a>`;
 }
 function boutiqueModal(companyId,b,cat){
   const isNew=!b,cur=b?.category||cat||"men";
@@ -221,7 +223,7 @@ async function renderBoutique(id){
       <div class="tiles">
         <div class="card tile"><span>Стоимость закупки</span><b>${money(b.total)}</b><small>${b.total_mode==="manual"?"указана вручную":"по товарам"}</small></div>
         <div class="card tile"><span>Депозит</span><b>${money(b.deposit)}</b><small>${b.deposit>0?"вычтен из стоимости":"не вносился"}</small></div>
-        <div class="card tile accent"><span>Заплатил Санжар</span><b>${money(b.paid_own)}</b><small>${b.payments.length?cnt(b.payments.length,"платёж","платежа","платежей"):"платежей нет"}</small></div>
+        <div class="card tile hasan-tile"><span>Оплатил Хасан</span><b>${money(b.paid_own)}</b><small>${b.payments.length?cnt(b.payments.length,"платёж","платежа","платежей"):"платежей нет"}</small></div>
         <div class="card tile ${b.remaining>0?"warn":"ok"}"><span>Осталось оплатить</span><b>${money(b.remaining)}</b><small>${b.overpaid>0?"переплата "+money(b.overpaid):(b.total>0&&b.remaining<=0?"закупка оплачена":"")}</small></div>
       </div>
 
@@ -235,11 +237,11 @@ async function renderBoutique(id){
         <div class="big">${money(b.deposit)}</div>
         <div class="line">${b.deposit>0
           ?`${b.deposit_date?"внесён "+dRu(b.deposit_date)+" · ":""}${b.deposit_note?esc(b.deposit_note)+" · ":""}залог / предоплата — <b>уже вычтена</b> из стоимости закупки.`
-          :"Депозит не вносился."} Депозит считается отдельно от денег Санжара и в платежах Санжара не участвует.</div></div>
+          :"Депозит не вносился."} Депозит считается отдельно от денег Хасана и в платежах Хасана не участвует.</div></div>
 
-      <div class="card fin"><div class="fin-h"><h3>Оплаты Санжара</h3><button class="btn sm primary" id="add-pay">${I.plus}Добавить платёж</button></div>
-        <div class="line">Всего заплатил Санжар своих денег: <b>${money(b.paid_own)}</b></div>
-        <div class="formula">Осталось оплатить = ${money(b.total)} (стоимость) − ${money(b.deposit)} (депозит) − ${money(b.paid_own)} (Санжар) = <b>${money(b.remaining)}</b>${b.overpaid>0?` · оплачено больше стоимости: переплата <b>${money(b.overpaid)}</b>`:""}</div>
+      <div class="card fin"><div class="fin-h"><h3>Оплаты Хасана</h3><button class="btn sm primary" id="add-pay">${I.plus}Добавить платёж</button></div>
+        <div class="line">Всего оплатил Хасан своих денег: <b class="hasan-sum">${money(b.paid_own)}</b></div>
+        <div class="formula">Осталось оплатить = ${money(b.total)} (стоимость) − ${money(b.deposit)} (депозит) − ${money(b.paid_own)} (Хасан) = <b>${money(b.remaining)}</b>${b.overpaid>0?` · оплачено больше стоимости: переплата <b>${money(b.overpaid)}</b>`:""}</div>
         ${pays.some(p=>p.source==="deposit")?`<div class="hint" style="margin-top:8px">Записи с пометкой «из депозита» остались от прежней версии. Депозит и так вычтен из стоимости, поэтому они в расчёт не входят — их можно удалить.</div>`:""}
         ${pays.length?`<div class="pays">${pays.map(payRow).join("")}</div>`:`<div class="hint" style="margin-top:10px">Платежей пока нет.</div>`}</div>
 
@@ -277,7 +279,7 @@ function itemRow(i,b,sym){
     <div class="acts"><button class="mini" data-ie="${i.id}" title="Изменить">${I.edit}</button><button class="mini del" data-id="${i.id}" title="Удалить">${I.trash}</button></div></div>`;
 }
 function payRow(p){
-  return `<div class="item"><div class="main"><div class="ttl">${money(p.amount)}${p.source==="deposit"?` <span class="chip deposit">из депозита — не учитывается</span>`:""}</div>
+  return `<div class="item"><div class="main"><div class="ttl ${p.source==="deposit"?"":"hasan-sum"}">${money(p.amount)}${p.source==="deposit"?` <span class="chip deposit">из депозита — не учитывается</span>`:""}</div>
     <div class="sub">${dRu(p.date)}${p.note?" · "+esc(p.note):""}</div></div>
     <div class="acts"><button class="mini" data-pe="${p.id}" title="Изменить">${I.edit}</button><button class="mini del" data-pd="${p.id}" title="Удалить">${I.trash}</button></div></div>`;
 }
@@ -321,7 +323,7 @@ function depositModal(b,after){
     ${fld("num","d-amount","Сумма депозита",b.deposit||"",{ph:"0",autofocus:true})}
     ${fld("date","d-date","Дата внесения (необязательно)",b.deposit_date||"")}
     ${fld("text","d-note","Комментарий",b.deposit_note,{full:true,ph:"необязательно"})}</div>
-    <div class="hint" style="margin-top:10px">Депозит — залог или предоплата. Он сразу вычитается из стоимости закупки: остаток = стоимость − депозит − оплаты Санжара. Вносить его отдельным платежом не нужно.</div>`,FOOT());
+    <div class="hint" style="margin-top:10px">Депозит — залог или предоплата. Он сразу вычитается из стоимости закупки: остаток = стоимость − депозит − оплаты Хасана. Вносить его отдельным платежом не нужно.</div>`,FOOT());
   onSubmit(async()=>{
     await api("/api/boutiques/"+b.id,{method:"PATCH",body:{deposit:v("d-amount")||0,deposit_date:v("d-date"),deposit_note:v("d-note")}});
     closeModal();toast("Депозит сохранён","ok");after();
@@ -329,11 +331,11 @@ function depositModal(b,after){
 }
 function paymentModal(b,p,after){
   const isNew=!p;
-  openModal(isNew?"Платёж Санжара":"Платёж",`<div class="frm">
+  openModal(isNew?"Платёж Хасана":"Платёж",`<div class="frm">
     ${fld("date","p-date","Дата платежа",p?.date||todayISO())}
     ${fld("num","p-amount","Сумма",p?.amount,{ph:"0",autofocus:true})}
     ${fld("text","p-note","Комментарий",p?.note,{full:true,ph:"необязательно"})}</div>
-    <div class="hint" style="margin-top:10px">Здесь — только деньги, которые заплатил Санжар. Депозит записывается в своём блоке и вычитается из стоимости сам.</div>`,FOOT(isNew?"Добавить":"Сохранить"));
+    <div class="hint" style="margin-top:10px">Здесь — только деньги, которые заплатил Хасан. Депозит записывается в своём блоке и вычитается из стоимости сам.</div>`,FOOT(isNew?"Добавить":"Сохранить"));
   onSubmit(async()=>{
     const body={boutique_id:b.id,date:v("p-date"),amount:v("p-amount"),note:v("p-note")};
     await api(isNew?"/api/payments":"/api/payments/"+p.id,{method:isNew?"POST":"PATCH",body});
