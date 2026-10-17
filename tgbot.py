@@ -100,15 +100,18 @@ def api(method, path, body=None):
         except Exception: msg = "код %d" % e.code
         raise RuntimeError(msg)
 
-KINDS = {"companies": "компания", "boutiques": "бутик", "items": "товар", "payments": "платёж", "settings": "настройки"}
+KINDS = {"companies": "компания", "boutiques": "бутик", "items": "товар", "payments": "платёж", "settings": "настройки",
+         "suppliers": "поставщик", "catalog-items": "товар справочника"}
 # вычисляемые поля карточек — их нельзя записать обратно
 SKIP = {"ok", "items_total", "total", "paid_own", "paid", "remaining", "overpaid",
         "items_count", "payments_count", "qty_total", "received_total", "company_name", "company_date",
-        "boutiques", "boutiques_count", "items", "payments", "boutique", "created_at", "updated_at"}
+        "boutiques", "boutiques_count", "items", "payments", "boutique", "created_at", "updated_at",
+        "amount", "supplier_name", "supplier_cn", "invoice_number", "invoice_date", "unsure_count", "deposit_total",
+        "to_pay", "invoices", "invoice_list"}
 
 def fetch_one(path):
     """Состояние записи до изменения — чтобы кнопка «Отменить» вернула как было."""
-    if path != "/api/settings" and not re.match(r"^/api/(companies|boutiques|items|payments)/\d+$", path): return None
+    if path != "/api/settings" and not re.match(r"^/api/(companies|boutiques|items|payments|suppliers|catalog-items)/\d+$", path): return None
     try: return api("GET", path)
     except Exception: return None
 
@@ -275,6 +278,10 @@ SYSTEM = """Ты — помощник владельца в его програ�
 • /api/payments — платежи Санжара (его собственные деньги): POST {boutique_id, date, amount, note}; /api/payments/{id} — GET, PATCH, DELETE.
   Поле source не передавай: депозит платежом не списывается.
 • /api/settings — GET, PATCH: currency (USD|KGS|KZT|RUB|CNY|EUR). /api/backup — POST резервная копия.
+• /api/catalog?q=АРТИКУЛ_ИЛИ_СЛОВО — справочник поставщиков и товаров с ценой прихода в ЮАНЯХ (к бутикам не привязан).
+  Вопрос «почём 8805», «сколько стоит артикул …» — ищи здесь. Один артикул бывает у разных поставщиков с разной
+  ценой — называй поставщика и цену для каждого. /api/suppliers/{id} — карточка поставщика с накладными и товарами.
+  /api/catalog-items/{id} — PATCH {article, name, what, qty, price, note, unsure}, DELETE.
 
 ФИНАНСЫ БУТИКА считает программа, ты только записываешь операции:
 стоимость = сумма товаров (или manual_total); депозит — залог / предоплата, он СРАЗУ вычитается из стоимости;
